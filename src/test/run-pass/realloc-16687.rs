@@ -13,12 +13,10 @@
 // Ideally this would be revised to use no_std, but for now it serves
 // well enough to reproduce (and illustrate) the bug from #16687.
 
-#![feature(heap_api, alloc, oom)]
+#![feature(heap_api, allocator_api)]
 
-extern crate alloc;
-
-use alloc::heap;
-use std::ptr;
+use std::alloc::{Global, Alloc, Layout, handle_alloc_error};
+use std::ptr::{self, NonNull};
 
 fn main() {
     unsafe {
@@ -47,40 +45,43 @@ unsafe fn test_triangle() -> bool {
 
     static PRINT : bool = false;
 
-    unsafe fn allocate(size: usize, align: usize) -> *mut u8 {
-        if PRINT { println!("allocate(size={} align={})", size, align); }
-
-        let ret = heap::allocate(size, align);
-        if ret.is_null() { alloc::oom() }
-
-        if PRINT { println!("allocate(size={} align={}) ret: 0x{:010x}",
-                            size, align, ret as usize);
-        }
-
-        ret
-    }
-    unsafe fn deallocate(ptr: *mut u8, size: usize, align: usize) {
-        if PRINT { println!("deallocate(ptr=0x{:010x} size={} align={})",
-                            ptr as usize, size, align);
-        }
-
-        heap::deallocate(ptr, size, align);
-    }
-    unsafe fn reallocate(ptr: *mut u8, old_size: usize, size: usize, align: usize) -> *mut u8 {
+    unsafe fn allocate(layout: Layout) -> *mut u8 {
         if PRINT {
-            println!("reallocate(ptr=0x{:010x} old_size={} size={} align={})",
-                     ptr as usize, old_size, size, align);
+            println!("allocate({:?})", layout);
         }
 
-        let ret = heap::reallocate(ptr, old_size, size, align);
-        if ret.is_null() { alloc::oom() }
+        let ret = Global.alloc(layout).unwrap_or_else(|_| handle_alloc_error(layout));
 
         if PRINT {
-            println!("reallocate(ptr=0x{:010x} old_size={} size={} align={}) \
-                      ret: 0x{:010x}",
-                     ptr as usize, old_size, size, align, ret as usize);
+            println!("allocate({:?}) = {:?}", layout, ret);
         }
-        ret
+
+        ret.cast().as_ptr()
+    }
+
+    unsafe fn deallocate(ptr: *mut u8, layout: Layout) {
+        if PRINT {
+            println!("deallocate({:?}, {:?}", ptr, layout);
+        }
+
+        Global.dealloc(NonNull::new_unchecked(ptr), layout);
+    }
+
+    unsafe fn reallocate(ptr: *mut u8, old: Layout, new: Layout) -> *mut u8 {
+        if PRINT {
+            println!("reallocate({:?}, old={:?}, new={:?})", ptr, old, new);
+        }
+
+        let ret = Global.realloc(NonNull::new_unchecked(ptr), old, new.size())
+            .unwrap_or_else(|_| handle_alloc_error(
+                Layout::from_size_align_unchecked(new.size(), old.align())
+            ));
+
+        if PRINT {
+            println!("reallocate({:?}, old={:?}, new={:?}) = {:?}",
+                     ptr, old, new, ret);
+        }
+        ret.cast().as_ptr()
     }
 
     fn idx_to_size(i: usize) -> usize { (i+1) * 10 }
@@ -91,8 +92,8 @@ unsafe fn test_triangle() -> bool {
     // way.)
     for i in 0..COUNT / 2 {
         let size = idx_to_size(i);
-        ascend[2*i]   = allocate(size, ALIGN);
-        ascend[2*i+1] = allocate(size, ALIGN);
+        ascend[2*i]   = allocate(Layout::from_size_align(size, ALIGN).unwrap());
+        ascend[2*i+1] = allocate(Layout::from_size_align(size, ALIGN).unwrap());
     }
 
     // Initialize each pair of rows to distinct value.
@@ -112,8 +113,8 @@ unsafe fn test_triangle() -> bool {
 
     for i in 0..COUNT / 2 {
         let size = idx_to_size(i);
-        deallocate(ascend[2*i], size, ALIGN);
-        deallocate(ascend[2*i+1], size, ALIGN);
+        deallocate(ascend[2*i], Layout::from_size_align(size, ALIGN).unwrap());
+        deallocate(ascend[2*i+1], Layout::from_size_align(size, ALIGN).unwrap());
     }
 
     return true;
@@ -124,14 +125,16 @@ unsafe fn test_triangle() -> bool {
     // rows as we go.
     unsafe fn test_1(ascend: &mut [*mut u8]) {
         let new_size = idx_to_size(COUNT-1);
+        let new = Layout::from_size_align(new_size, ALIGN).unwrap();
         for i in 0..COUNT / 2 {
             let (p0, p1, old_size) = (ascend[2*i], ascend[2*i+1], idx_to_size(i));
             assert!(old_size < new_size);
+            let old = Layout::from_size_align(old_size, ALIGN).unwrap();
 
-            ascend[2*i] = reallocate(p0, old_size, new_size, ALIGN);
+            ascend[2*i] = reallocate(p0, old.clone(), new.clone());
             sanity_check(&*ascend);
 
-            ascend[2*i+1] = reallocate(p1, old_size, new_size, ALIGN);
+            ascend[2*i+1] = reallocate(p1, old.clone(), new.clone());
             sanity_check(&*ascend);
         }
     }
@@ -139,14 +142,16 @@ unsafe fn test_triangle() -> bool {
     // Test 2: turn the square back into a triangle, top to bottom.
     unsafe fn test_2(ascend: &mut [*mut u8]) {
         let old_size = idx_to_size(COUNT-1);
+        let old = Layout::from_size_align(old_size, ALIGN).unwrap();
         for i in 0..COUNT / 2 {
             let (p0, p1, new_size) = (ascend[2*i], ascend[2*i+1], idx_to_size(i));
             assert!(new_size < old_size);
+            let new = Layout::from_size_align(new_size, ALIGN).unwrap();
 
-            ascend[2*i] = reallocate(p0, old_size, new_size, ALIGN);
+            ascend[2*i] = reallocate(p0, old.clone(), new.clone());
             sanity_check(&*ascend);
 
-            ascend[2*i+1] = reallocate(p1, old_size, new_size, ALIGN);
+            ascend[2*i+1] = reallocate(p1, old.clone(), new.clone());
             sanity_check(&*ascend);
         }
     }
@@ -154,14 +159,16 @@ unsafe fn test_triangle() -> bool {
     // Test 3: turn triangle into a square, bottom to top.
     unsafe fn test_3(ascend: &mut [*mut u8]) {
         let new_size = idx_to_size(COUNT-1);
+        let new = Layout::from_size_align(new_size, ALIGN).unwrap();
         for i in (0..COUNT / 2).rev() {
             let (p0, p1, old_size) = (ascend[2*i], ascend[2*i+1], idx_to_size(i));
             assert!(old_size < new_size);
+            let old = Layout::from_size_align(old_size, ALIGN).unwrap();
 
-            ascend[2*i+1] = reallocate(p1, old_size, new_size, ALIGN);
+            ascend[2*i+1] = reallocate(p1, old.clone(), new.clone());
             sanity_check(&*ascend);
 
-            ascend[2*i] = reallocate(p0, old_size, new_size, ALIGN);
+            ascend[2*i] = reallocate(p0, old.clone(), new.clone());
             sanity_check(&*ascend);
         }
     }
@@ -169,14 +176,16 @@ unsafe fn test_triangle() -> bool {
     // Test 4: turn the square back into a triangle, bottom to top.
     unsafe fn test_4(ascend: &mut [*mut u8]) {
         let old_size = idx_to_size(COUNT-1);
+        let old = Layout::from_size_align(old_size, ALIGN).unwrap();
         for i in (0..COUNT / 2).rev() {
             let (p0, p1, new_size) = (ascend[2*i], ascend[2*i+1], idx_to_size(i));
             assert!(new_size < old_size);
+            let new = Layout::from_size_align(new_size, ALIGN).unwrap();
 
-            ascend[2*i+1] = reallocate(p1, old_size, new_size, ALIGN);
+            ascend[2*i+1] = reallocate(p1, old.clone(), new.clone());
             sanity_check(&*ascend);
 
-            ascend[2*i] = reallocate(p0, old_size, new_size, ALIGN);
+            ascend[2*i] = reallocate(p0, old.clone(), new.clone());
             sanity_check(&*ascend);
         }
     }

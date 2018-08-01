@@ -36,7 +36,7 @@ pub fn main() {
     }
 
     match 100 {
-        b'a' ... b'z' => {},
+        b'a' ..= b'z' => {},
         _ => panic!()
     }
 
@@ -57,7 +57,7 @@ pub fn main() {
         _ => panic!(),
     }
 
-    let buf = vec!(97u8, 98, 99, 100);
+    let buf = vec![97u8, 98, 99, 100];
     assert_eq!(match &buf[0..3] {
          b"def" => 1,
          b"abc" => 2,

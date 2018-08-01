@@ -9,7 +9,7 @@
 // except according to those terms.
 
 // ignore-tidy-linelength
-// compile-flags:-Zprint-trans-items=eager
+// compile-flags:-Zprint-mono-items=eager
 
 #![crate_type="lib"]
 #![deny(dead_code)]
@@ -85,5 +85,4 @@ impl NonGeneric {
 }
 
 // Only the non-generic methods should be instantiated:
-//~ TRANS_ITEM fn unused_traits_and_generics::{{impl}}[3]::foo[0]
-//~ TRANS_ITEM drop-glue i8
+//~ MONO_ITEM fn unused_traits_and_generics::{{impl}}[3]::foo[0]

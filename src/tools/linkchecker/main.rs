@@ -24,16 +24,12 @@
 //! A few whitelisted exceptions are allowed as there's known bugs in rustdoc,
 //! but this should catch the majority of "broken link" cases.
 
-extern crate url;
-
 use std::env;
 use std::fs::File;
 use std::io::prelude::*;
-use std::path::{Path, PathBuf};
+use std::path::{Path, PathBuf, Component};
 use std::collections::{HashMap, HashSet};
 use std::collections::hash_map::Entry;
-
-use url::Url;
 
 use Redirect::*;
 
@@ -45,11 +41,10 @@ macro_rules! t {
 }
 
 fn main() {
-    let docs = env::args().nth(1).unwrap();
+    let docs = env::args_os().nth(1).unwrap();
     let docs = env::current_dir().unwrap().join(docs);
-    let mut url = Url::from_file_path(&docs).unwrap();
     let mut errors = false;
-    walk(&mut HashMap::new(), &docs, &docs, &mut url, &mut errors);
+    walk(&mut HashMap::new(), &docs, &docs, &mut errors);
     if errors {
         panic!("found some broken links");
     }
@@ -74,29 +69,46 @@ struct FileEntry {
 
 type Cache = HashMap<PathBuf, FileEntry>;
 
+fn small_url_encode(s: &str) -> String {
+    s.replace("<", "%3C")
+     .replace(">", "%3E")
+     .replace(" ", "%20")
+     .replace("?", "%3F")
+     .replace("'", "%27")
+     .replace("&", "%26")
+     .replace(",", "%2C")
+     .replace(":", "%3A")
+     .replace(";", "%3B")
+     .replace("[", "%5B")
+     .replace("]", "%5D")
+     .replace("\"", "%22")
+}
+
 impl FileEntry {
     fn parse_ids(&mut self, file: &Path, contents: &str, errors: &mut bool) {
         if self.ids.is_empty() {
-            with_attrs_in_source(contents, " id", |fragment, i| {
+            with_attrs_in_source(contents, " id", |fragment, i, _| {
                 let frag = fragment.trim_left_matches("#").to_owned();
+                let encoded = small_url_encode(&frag);
                 if !self.ids.insert(frag) {
                     *errors = true;
                     println!("{}:{}: id is not unique: `{}`", file.display(), i, fragment);
                 }
+                // Just in case, we also add the encoded id.
+                self.ids.insert(encoded);
             });
         }
     }
 }
 
-fn walk(cache: &mut Cache, root: &Path, dir: &Path, url: &mut Url, errors: &mut bool) {
+fn walk(cache: &mut Cache, root: &Path, dir: &Path, errors: &mut bool) {
     for entry in t!(dir.read_dir()).map(|e| t!(e)) {
         let path = entry.path();
         let kind = t!(entry.file_type());
-        url.path_segments_mut().unwrap().push(entry.file_name().to_str().unwrap());
         if kind.is_dir() {
-            walk(cache, root, &path, url, errors);
+            walk(cache, root, &path, errors);
         } else {
-            let pretty_path = check(cache, root, &path, url, errors);
+            let pretty_path = check(cache, root, &path, errors);
             if let Some(pretty_path) = pretty_path {
                 let entry = cache.get_mut(&pretty_path).unwrap();
                 // we don't need the source anymore,
@@ -104,41 +116,52 @@ fn walk(cache: &mut Cache, root: &Path, dir: &Path, url: &mut Url, errors: &mut 
                 entry.source = String::new();
             }
         }
-        url.path_segments_mut().unwrap().pop();
     }
 }
 
 fn check(cache: &mut Cache,
          root: &Path,
          file: &Path,
-         base: &Url,
          errors: &mut bool)
          -> Option<PathBuf> {
-    // ignore js files as they are not prone to errors as the rest of the
-    // documentation is and they otherwise bring up false positives.
-    if file.extension().and_then(|s| s.to_str()) == Some("js") {
+    // Ignore none HTML files.
+    if file.extension().and_then(|s| s.to_str()) != Some("html") {
         return None;
     }
 
     // Unfortunately we're not 100% full of valid links today to we need a few
     // whitelists to get this past `make check` today.
     // FIXME(#32129)
-    if file.ends_with("std/string/struct.String.html") {
+    if file.ends_with("std/string/struct.String.html") ||
+       file.ends_with("interpret/struct.ValTy.html") ||
+       file.ends_with("symbol/struct.InternedString.html") ||
+       file.ends_with("ast/struct.ThinVec.html") ||
+       file.ends_with("util/struct.ThinVec.html") ||
+       file.ends_with("util/struct.RcSlice.html") ||
+       file.ends_with("layout/struct.TyLayout.html") ||
+       file.ends_with("humantime/struct.Timestamp.html") ||
+       file.ends_with("log/index.html") ||
+       file.ends_with("ty/struct.Slice.html") ||
+       file.ends_with("ty/enum.Attributes.html") ||
+       file.ends_with("ty/struct.SymbolName.html") {
         return None;
     }
     // FIXME(#32553)
-    if file.ends_with("collections/string/struct.String.html") {
+    if file.ends_with("string/struct.String.html") {
         return None;
     }
     // FIXME(#32130)
     if file.ends_with("btree_set/struct.BTreeSet.html") ||
-       file.ends_with("collections/struct.BTreeSet.html") ||
-       file.ends_with("collections/btree_map/struct.BTreeMap.html") ||
-       file.ends_with("collections/hash_map/struct.HashMap.html") {
+       file.ends_with("struct.BTreeSet.html") ||
+       file.ends_with("btree_map/struct.BTreeMap.html") ||
+       file.ends_with("hash_map/struct.HashMap.html") ||
+       file.ends_with("hash_set/struct.HashSet.html") ||
+       file.ends_with("sync/struct.Lrc.html") ||
+       file.ends_with("sync/struct.RwLock.html") {
         return None;
     }
 
-    let res = load_file(cache, root, PathBuf::from(file), SkipRedirect);
+    let res = load_file(cache, root, file, SkipRedirect);
     let (pretty_file, contents) = match res {
         Ok(res) => res,
         Err(_) => return None,
@@ -150,26 +173,44 @@ fn check(cache: &mut Cache,
     }
 
     // Search for anything that's the regex 'href[ ]*=[ ]*".*?"'
-    with_attrs_in_source(&contents, " href", |url, i| {
+    with_attrs_in_source(&contents, " href", |url, i, base| {
         // Ignore external URLs
         if url.starts_with("http:") || url.starts_with("https:") ||
            url.starts_with("javascript:") || url.starts_with("ftp:") ||
            url.starts_with("irc:") || url.starts_with("data:") {
             return;
         }
+        let mut parts = url.splitn(2, "#");
+        let url = parts.next().unwrap();
+        let fragment = parts.next();
+        let mut parts = url.splitn(2, "?");
+        let url = parts.next().unwrap();
+
         // Once we've plucked out the URL, parse it using our base url and
         // then try to extract a file path.
-        let (parsed_url, path) = match url_to_file_path(&base, url) {
-            Some((url, path)) => (url, PathBuf::from(path)),
-            None => {
-                *errors = true;
-                println!("{}:{}: invalid link - {}",
-                         pretty_file.display(),
-                         i + 1,
-                         url);
-                return;
+        let mut path = file.to_path_buf();
+        if !base.is_empty() || !url.is_empty() {
+            path.pop();
+            for part in Path::new(base).join(url).components() {
+                match part {
+                    Component::Prefix(_) |
+                    Component::RootDir => {
+                        // Avoid absolute paths as they make the docs not
+                        // relocatable by making assumptions on where the docs
+                        // are hosted relative to the site root.
+                        *errors = true;
+                        println!("{}:{}: absolute path - {}",
+                                 pretty_file.display(),
+                                 i + 1,
+                                 Path::new(base).join(url).display());
+                        return;
+                    }
+                    Component::CurDir => {}
+                    Component::ParentDir => { path.pop(); }
+                    Component::Normal(s) => { path.push(s); }
+                }
             }
-        };
+        }
 
         // Alright, if we've found a file name then this file had better
         // exist! If it doesn't then we register and print an error.
@@ -185,10 +226,18 @@ fn check(cache: &mut Cache,
                          pretty_path.display());
                 return;
             }
-            let res = load_file(cache, root, path.clone(), FromRedirect(false));
+            if let Some(extension) = path.extension() {
+                // Ignore none HTML files.
+                if extension != "html" {
+                    return;
+                }
+            }
+            let res = load_file(cache, root, &path, FromRedirect(false));
             let (pretty_path, contents) = match res {
                 Ok(res) => res,
-                Err(LoadError::IOError(err)) => panic!(format!("{}", err)),
+                Err(LoadError::IOError(err)) => {
+                    panic!("error loading {}: {}", path.display(), err);
+                }
                 Err(LoadError::BrokenRedirect(target, _)) => {
                     *errors = true;
                     println!("{}:{}: broken redirect to {}",
@@ -200,11 +249,16 @@ fn check(cache: &mut Cache,
                 Err(LoadError::IsRedirect) => unreachable!(),
             };
 
-            if let Some(ref fragment) = parsed_url.fragment() {
+            if let Some(ref fragment) = fragment {
                 // Fragments like `#1-6` are most likely line numbers to be
                 // interpreted by javascript, so we're ignoring these
                 if fragment.splitn(2, '-')
                            .all(|f| f.chars().all(|c| c.is_numeric())) {
+                    return;
+                }
+
+                // These appear to be broken in mdbook right now?
+                if fragment.starts_with("-") {
                     return;
                 }
 
@@ -213,7 +267,7 @@ fn check(cache: &mut Cache,
 
                 if !entry.ids.contains(*fragment) {
                     *errors = true;
-                    print!("{}:{}: broken link fragment  ",
+                    print!("{}:{}: broken link fragment ",
                            pretty_file.display(),
                            i + 1);
                     println!("`#{}` pointing to `{}`", fragment, pretty_path.display());
@@ -231,7 +285,7 @@ fn check(cache: &mut Cache,
 
 fn load_file(cache: &mut Cache,
              root: &Path,
-             file: PathBuf,
+             file: &Path,
              redirect: Redirect)
              -> Result<(PathBuf, String), LoadError> {
     let mut contents = String::new();
@@ -243,15 +297,14 @@ fn load_file(cache: &mut Cache,
             None
         }
         Entry::Vacant(entry) => {
-            let mut fp = try!(File::open(file.clone()).map_err(|err| {
+            let mut fp = File::open(file).map_err(|err| {
                 if let FromRedirect(true) = redirect {
-                    LoadError::BrokenRedirect(file.clone(), err)
+                    LoadError::BrokenRedirect(file.to_path_buf(), err)
                 } else {
                     LoadError::IOError(err)
                 }
-            }));
-            try!(fp.read_to_string(&mut contents)
-                   .map_err(|err| LoadError::IOError(err)));
+            })?;
+            fp.read_to_string(&mut contents).map_err(|err| LoadError::IOError(err))?;
 
             let maybe = maybe_redirect(&contents);
             if maybe.is_some() {
@@ -267,12 +320,9 @@ fn load_file(cache: &mut Cache,
             maybe
         }
     };
-    let base = Url::from_file_path(&file).unwrap();
-
-    match maybe_redirect.and_then(|url| url_to_file_path(&base, &url)) {
-        Some((_, redirect_file)) => {
-            let path = PathBuf::from(redirect_file);
-            load_file(cache, root, path, FromRedirect(true))
+    match maybe_redirect.map(|url| file.parent().unwrap().join(url)) {
+        Some(redirect_file) => {
+            load_file(cache, root, &redirect_file, FromRedirect(true))
         }
         None => Ok((pretty_file, contents)),
     }
@@ -294,16 +344,14 @@ fn maybe_redirect(source: &str) -> Option<String> {
     })
 }
 
-fn url_to_file_path(parser: &Url, url: &str) -> Option<(Url, PathBuf)> {
-    parser.join(url)
-          .ok()
-          .and_then(|parsed_url| parsed_url.to_file_path().ok().map(|f| (parsed_url, f)))
-}
-
-fn with_attrs_in_source<F: FnMut(&str, usize)>(contents: &str, attr: &str, mut f: F) {
+fn with_attrs_in_source<F: FnMut(&str, usize, &str)>(contents: &str, attr: &str, mut f: F) {
+    let mut base = "";
     for (i, mut line) in contents.lines().enumerate() {
         while let Some(j) = line.find(attr) {
             let rest = &line[j + attr.len()..];
+            // The base tag should always be the first link in the document so
+            // we can get away with using one pass.
+            let is_base = line[..j].ends_with("<base");
             line = rest;
             let pos_equals = match rest.find("=") {
                 Some(i) => i,
@@ -329,7 +377,11 @@ fn with_attrs_in_source<F: FnMut(&str, usize)>(contents: &str, attr: &str, mut f
                 Some(i) => &rest[..i],
                 None => continue,
             };
-            f(url, i)
+            if is_base {
+                base = url;
+                continue;
+            }
+            f(url, i, base)
         }
     }
 }

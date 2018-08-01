@@ -19,8 +19,9 @@ extern crate rustc_plugin;
 
 use syntax::ast::{self, Item, MetaItem, ItemKind};
 use syntax::ext::base::*;
-use syntax::parse::{self, token};
+use syntax::parse;
 use syntax::ptr::P;
+use syntax::symbol::Symbol;
 use syntax::tokenstream::TokenTree;
 use syntax_pos::Span;
 use rustc_plugin::Registry;
@@ -34,12 +35,13 @@ pub fn plugin_registrar(reg: &mut Registry) {
     reg.register_macro("make_a_1", expand_make_a_1);
     reg.register_macro("identity", expand_identity);
     reg.register_syntax_extension(
-        token::intern("into_multi_foo"),
-        // FIXME (#22405): Replace `Box::new` with `box` here when/if possible.
+        Symbol::intern("into_multi_foo"),
         MultiModifier(Box::new(expand_into_foo_multi)));
     reg.register_syntax_extension(
-        token::intern("duplicate"),
-        // FIXME (#22405): Replace `Box::new` with `box` here when/if possible.
+        Symbol::intern("noop_attribute"),
+        MultiModifier(Box::new(expand_noop_attribute)));
+    reg.register_syntax_extension(
+        Symbol::intern("duplicate"),
         MultiDecorator(Box::new(expand_duplicate)));
 }
 
@@ -55,8 +57,7 @@ fn expand_make_a_1(cx: &mut ExtCtxt, sp: Span, tts: &[TokenTree])
 fn expand_identity(cx: &mut ExtCtxt, _span: Span, tts: &[TokenTree])
                    -> Box<MacResult+'static> {
     // Parse an expression and emit it unchanged.
-    let mut parser = parse::new_parser_from_tts(cx.parse_sess(),
-        cx.cfg(), tts.to_vec());
+    let mut parser = parse::new_parser_from_tts(cx.parse_sess(), tts.to_vec());
     let expr = parser.parse_expr().unwrap();
     MacEager::expr(quote_expr!(&mut *cx, $expr))
 }
@@ -75,7 +76,7 @@ fn expand_into_foo_multi(cx: &mut ExtCtxt,
         Annotatable::ImplItem(_) => {
             quote_item!(cx, impl X { fn foo(&self) -> i32 { 42 } }).unwrap().and_then(|i| {
                 match i.node {
-                    ItemKind::Impl(_, _, _, _, _, mut items) => {
+                    ItemKind::Impl(.., mut items) => {
                         Annotatable::ImplItem(P(items.pop().expect("impl method not found")))
                     }
                     _ => unreachable!("impl parsed to something other than impl")
@@ -85,14 +86,25 @@ fn expand_into_foo_multi(cx: &mut ExtCtxt,
         Annotatable::TraitItem(_) => {
             quote_item!(cx, trait X { fn foo(&self) -> i32 { 0 } }).unwrap().and_then(|i| {
                 match i.node {
-                    ItemKind::Trait(_, _, _, mut items) => {
+                    ItemKind::Trait(.., mut items) => {
                         Annotatable::TraitItem(P(items.pop().expect("trait method not found")))
                     }
                     _ => unreachable!("trait parsed to something other than trait")
                 }
             })
         }
+        // covered in proc_macro/macros-in-extern.rs
+        Annotatable::ForeignItem(_) => unimplemented!(),
+        // covered in proc_macro/attr-stmt-expr.rs
+        Annotatable::Stmt(_) | Annotatable::Expr(_) => panic!("expected item")
     }
+}
+
+fn expand_noop_attribute(_cx: &mut ExtCtxt,
+                         _sp: Span,
+                         _attr: &MetaItem,
+                         it: Annotatable) -> Annotatable {
+    it
 }
 
 // Create a duplicate of the annotatable, based on the MetaItem
@@ -103,9 +115,9 @@ fn expand_duplicate(cx: &mut ExtCtxt,
                     push: &mut FnMut(Annotatable))
 {
     let copy_name = match mi.node {
-        ast::MetaItemKind::List(_, ref xs) => {
+        ast::MetaItemKind::List(ref xs) => {
             if let Some(word) = xs[0].word() {
-                token::str_to_ident(&word.name())
+                word.ident.segments.last().unwrap().ident
             } else {
                 cx.span_err(mi.span, "Expected word");
                 return;
@@ -137,6 +149,10 @@ fn expand_duplicate(cx: &mut ExtCtxt,
             new_it.ident = copy_name;
             push(Annotatable::TraitItem(P(new_it)));
         }
+        // covered in proc_macro/macros-in-extern.rs
+        Annotatable::ForeignItem(_) => unimplemented!(),
+        // covered in proc_macro/attr-stmt-expr.rs
+        Annotatable::Stmt(_) | Annotatable::Expr(_) => panic!("expected item")
     }
 }
 

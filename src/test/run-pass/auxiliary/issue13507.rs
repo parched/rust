@@ -58,7 +58,7 @@ pub mod testtypes {
     // Tests TySlice
     pub type FooSlice = [u8];
 
-    // Tests TyBox (of u8)
+    // Tests Box (of u8)
     pub type FooBox = Box<u8>;
 
     // Tests TyRawPtr
@@ -70,18 +70,18 @@ pub mod testtypes {
     // Tests TyFnPtr
     pub type FooFnPtr = fn(u8) -> bool;
 
-    // Tests TyTrait
+    // Tests TyDynamic
     pub trait FooTrait {
         fn foo_method(&self) -> usize;
     }
 
-    // Tests TyStruct
+    // Tests struct
     pub struct FooStruct {
         pub pub_foo_field: usize,
         foo_field: usize
     }
 
-    // Tests TyEnum
+    // Tests enum
     pub enum FooEnum {
         VarA(usize),
         VarB(usize, usize)

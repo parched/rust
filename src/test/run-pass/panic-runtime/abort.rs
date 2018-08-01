@@ -10,6 +10,8 @@
 
 // compile-flags:-C panic=abort
 // no-prefer-dynamic
+// ignore-cloudabi no processes
+// ignore-emscripten no processes
 
 use std::process::Command;
 use std::env;
@@ -34,6 +36,15 @@ fn main() {
             panic!("try to catch me");
         }
     }
-    let s = Command::new(env::args_os().next().unwrap()).arg("foo").status();
+
+    let mut cmd = Command::new(env::args_os().next().unwrap());
+    cmd.arg("foo");
+
+    // ARMv6 hanges while printing the backtrace, see #41004
+    if cfg!(target_arch = "arm") && cfg!(target_env = "gnu") {
+        cmd.env("RUST_BACKTRACE", "0");
+    }
+
+    let s = cmd.status();
     assert!(s.unwrap().code() != Some(0));
 }

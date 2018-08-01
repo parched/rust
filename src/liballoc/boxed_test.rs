@@ -14,6 +14,8 @@ use core::any::Any;
 use core::ops::Deref;
 use core::result::Result::{Err, Ok};
 use core::clone::Clone;
+use core::f64;
+use core::i64;
 
 use std::boxed::Box;
 
@@ -29,8 +31,8 @@ struct Test;
 
 #[test]
 fn any_move() {
-    let a = Box::new(8) as Box<Any>;
-    let b = Box::new(Test) as Box<Any>;
+    let a = Box::new(8) as Box<dyn Any>;
+    let b = Box::new(Test) as Box<dyn Any>;
 
     match a.downcast::<i32>() {
         Ok(a) => {
@@ -45,8 +47,8 @@ fn any_move() {
         Err(..) => panic!(),
     }
 
-    let a = Box::new(8) as Box<Any>;
-    let b = Box::new(Test) as Box<Any>;
+    let a = Box::new(8) as Box<dyn Any>;
+    let b = Box::new(Test) as Box<dyn Any>;
 
     assert!(a.downcast::<Box<Test>>().is_err());
     assert!(b.downcast::<Box<i32>>().is_err());
@@ -54,8 +56,8 @@ fn any_move() {
 
 #[test]
 fn test_show() {
-    let a = Box::new(8) as Box<Any>;
-    let b = Box::new(Test) as Box<Any>;
+    let a = Box::new(8) as Box<dyn Any>;
+    let b = Box::new(Test) as Box<dyn Any>;
     let a_str = format!("{:?}", a);
     let b_str = format!("{:?}", b);
     assert_eq!(a_str, "Any");
@@ -63,8 +65,8 @@ fn test_show() {
 
     static EIGHT: usize = 8;
     static TEST: Test = Test;
-    let a = &EIGHT as &Any;
-    let b = &TEST as &Any;
+    let a = &EIGHT as &dyn Any;
+    let b = &TEST as &dyn Any;
     let s = format!("{:?}", a);
     assert_eq!(s, "Any");
     let s = format!("{:?}", b);
@@ -108,12 +110,33 @@ fn raw_trait() {
         }
     }
 
-    let x: Box<Foo> = Box::new(Bar(17));
+    let x: Box<dyn Foo> = Box::new(Bar(17));
     let p = Box::into_raw(x);
     unsafe {
         assert_eq!(17, (*p).get());
         (*p).set(19);
-        let y: Box<Foo> = Box::from_raw(p);
+        let y: Box<dyn Foo> = Box::from_raw(p);
         assert_eq!(19, y.get());
     }
+}
+
+#[test]
+fn f64_slice() {
+    let slice: &[f64] = &[-1.0, 0.0, 1.0, f64::INFINITY];
+    let boxed: Box<[f64]> = Box::from(slice);
+    assert_eq!(&*boxed, slice)
+}
+
+#[test]
+fn i64_slice() {
+    let slice: &[i64] = &[i64::MIN, -2, -1, 0, 1, 2, i64::MAX];
+    let boxed: Box<[i64]> = Box::from(slice);
+    assert_eq!(&*boxed, slice)
+}
+
+#[test]
+fn str_slice() {
+    let s = "Hello, world!";
+    let boxed: Box<str> = Box::from(s);
+    assert_eq!(&*boxed, s)
 }

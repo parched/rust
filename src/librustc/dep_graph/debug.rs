@@ -12,7 +12,6 @@
 
 use super::dep_node::DepNode;
 use std::error::Error;
-use std::fmt::Debug;
 
 /// A dep-node filter goes from a user-defined string to a query over
 /// nodes. Right now the format is like this:
@@ -39,9 +38,9 @@ impl DepNodeFilter {
     }
 
     /// Tests whether `node` meets the filter, returning true if so.
-    pub fn test<D: Clone + Debug>(&self, node: &DepNode<D>) -> bool {
+    pub fn test(&self, node: &DepNode) -> bool {
         let debug_str = format!("{:?}", node);
-        self.text.split("&")
+        self.text.split('&')
                  .map(|s| s.trim())
                  .all(|f| debug_str.contains(f))
     }
@@ -55,7 +54,7 @@ pub struct EdgeFilter {
 }
 
 impl EdgeFilter {
-    pub fn new(test: &str) -> Result<EdgeFilter, Box<Error>> {
+    pub fn new(test: &str) -> Result<EdgeFilter, Box<dyn Error>> {
         let parts: Vec<_> = test.split("->").collect();
         if parts.len() != 2 {
             Err(format!("expected a filter like `a&b -> c&d`, not `{}`", test).into())
@@ -65,5 +64,12 @@ impl EdgeFilter {
                 target: DepNodeFilter::new(parts[1]),
             })
         }
+    }
+
+    pub fn test(&self,
+                source: &DepNode,
+                target: &DepNode)
+                -> bool {
+        self.source.test(source) && self.target.test(target)
     }
 }

@@ -20,6 +20,9 @@ pub struct Lazy<T> {
     init: fn() -> Arc<T>,
 }
 
+#[inline]
+const fn done<T>() -> *mut Arc<T> { 1_usize as *mut _ }
+
 unsafe impl<T> Sync for Lazy<T> {}
 
 impl<T: Send + Sync + 'static> Lazy<T> {
@@ -27,23 +30,21 @@ impl<T: Send + Sync + 'static> Lazy<T> {
         Lazy {
             lock: Mutex::new(),
             ptr: Cell::new(ptr::null_mut()),
-            init: init
+            init,
         }
     }
 
     pub fn get(&'static self) -> Option<Arc<T>> {
         unsafe {
-            self.lock.lock();
+            let _guard = self.lock.lock();
             let ptr = self.ptr.get();
-            let ret = if ptr.is_null() {
+            if ptr.is_null() {
                 Some(self.init())
-            } else if ptr as usize == 1 {
+            } else if ptr == done() {
                 None
             } else {
                 Some((*ptr).clone())
-            };
-            self.lock.unlock();
-            return ret
+            }
         }
     }
 
@@ -53,10 +54,10 @@ impl<T: Send + Sync + 'static> Lazy<T> {
         // the at exit handler). Otherwise we just return the freshly allocated
         // `Arc`.
         let registered = sys_common::at_exit(move || {
-            self.lock.lock();
-            let ptr = self.ptr.get();
-            self.ptr.set(1 as *mut _);
-            self.lock.unlock();
+            let ptr = {
+                let _guard = self.lock.lock();
+                self.ptr.replace(done())
+            };
             drop(Box::from_raw(ptr))
         });
         let ret = (self.init)();

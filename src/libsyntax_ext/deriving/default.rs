@@ -8,27 +8,28 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+use deriving::path_std;
 use deriving::generic::*;
 use deriving::generic::ty::*;
 
 use syntax::ast::{Expr, MetaItem};
 use syntax::ext::base::{Annotatable, ExtCtxt};
 use syntax::ext::build::AstBuilder;
-use syntax::parse::token::InternedString;
 use syntax::ptr::P;
+use syntax::symbol::Symbol;
 use syntax_pos::Span;
 
 pub fn expand_deriving_default(cx: &mut ExtCtxt,
                                span: Span,
                                mitem: &MetaItem,
                                item: &Annotatable,
-                               push: &mut FnMut(Annotatable)) {
-    let inline = cx.meta_word(span, InternedString::new("inline"));
+                               push: &mut dyn FnMut(Annotatable)) {
+    let inline = cx.meta_word(span, Symbol::intern("inline"));
     let attrs = vec![cx.attribute(span, inline)];
     let trait_def = TraitDef {
-        span: span,
+        span,
         attributes: Vec::new(),
-        path: path_std!(cx, core::default::Default),
+        path: path_std!(cx, default::Default),
         additional_bounds: Vec::new(),
         generics: LifetimeBounds::empty(),
         is_unsafe: false,
@@ -75,8 +76,8 @@ fn default_substructure(cx: &mut ExtCtxt, trait_span: Span, substr: &Substructur
             }
         }
         StaticEnum(..) => {
-            cx.span_err(trait_span,
-                        "`Default` cannot be derived for enums, only structs");
+            span_err_if_not_stage0!(cx, trait_span, E0665,
+                                    "`Default` cannot be derived for enums, only structs");
             // let compilation continue
             cx.expr_usize(trait_span, 0)
         }

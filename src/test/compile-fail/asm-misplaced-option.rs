@@ -11,6 +11,15 @@
 // ignore-android
 // ignore-arm
 // ignore-aarch64
+// ignore-s390x
+// ignore-emscripten
+// ignore-powerpc
+// ignore-powerpc64
+// ignore-powerpc64le
+// ignore-sparc
+// ignore-sparc64
+// ignore-mips
+// ignore-mips64
 
 #![feature(asm, rustc_attrs)]
 

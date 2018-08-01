@@ -8,59 +8,40 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-#![allow(unused_parens)]
-#![feature(plugin)]
-#![feature(plugin_registrar)]
-#![feature(rustc_private)]
-#![plugin(proc_macro)]
+// no-prefer-dynamic
 
-extern crate rustc_plugin;
+#![crate_type = "proc-macro"]
+#![feature(proc_macro, proc_macro_non_items)]
+
 extern crate proc_macro;
-extern crate syntax;
 
-use proc_macro::prelude::*;
+use proc_macro::*;
 
-use rustc_plugin::Registry;
+#[proc_macro]
+pub fn cond(input: TokenStream) -> TokenStream {
+    let mut conds = Vec::new();
+    let mut input = input.into_iter().peekable();
+    while let Some(tree) = input.next() {
+        let cond = match tree {
+            TokenTree::Group(tt) => tt.stream(),
+            _ => panic!("Invalid input"),
+        };
+        let mut cond_trees = cond.clone().into_iter();
+        let test = cond_trees.next().expect("Unexpected empty condition in `cond!`");
+        let rhs = cond_trees.collect::<TokenStream>();
+        if rhs.is_empty() {
+            panic!("Invalid macro usage in cond: {}", cond);
+        }
+        let is_else = match test {
+            TokenTree::Ident(ref word) => &*word.to_string() == "else",
+            _ => false,
+        };
+        conds.push(if is_else || input.peek().is_none() {
+            quote!({ $rhs })
+        } else {
+            quote!(if $test { $rhs } else)
+        });
+    }
 
-use syntax::ast::Ident;
-use syntax::codemap::{DUMMY_SP, Span};
-use syntax::ext::proc_macro_shim::build_block_emitter;
-use syntax::ext::base::{ExtCtxt, MacResult};
-use syntax::parse::token::{self, Token, DelimToken, keywords, str_to_ident};
-use syntax::tokenstream::{TokenTree, TokenStream};
-
-#[plugin_registrar]
-pub fn plugin_registrar(reg: &mut Registry) {
-    reg.register_macro("cond", cond);
-}
-
-fn cond<'cx>(cx: &'cx mut ExtCtxt, sp: Span, tts: &[TokenTree]) -> Box<MacResult + 'cx> {
-    let output = cond_rec(TokenStream::from_tts(tts.clone().to_owned()));
-    build_block_emitter(cx, sp, output)
-}
-
-fn cond_rec(input: TokenStream) -> TokenStream {
-  if input.is_empty() {
-      return qquote!();
-  }
-
-  let next = input.slice(0..1);
-  let rest = input.slice_from(1..);
-
-  let clause : TokenStream = match next.maybe_delimited() {
-    Some(ts) => ts,
-    _ => panic!("Invalid input"),
-  };
-
-  // clause is ([test]) [rhs]
-  if clause.len() < 2 { panic!("Invalid macro usage in cond: {:?}", clause) }
-
-  let test: TokenStream = clause.slice(0..1);
-  let rhs: TokenStream = clause.slice_from(1..);
-
-  if ident_eq(&test[0], str_to_ident("else")) || rest.is_empty() {
-    qquote!({unquote(rhs)})
-  } else {
-    qquote!({if unquote(test) { unquote(rhs) } else { cond!(unquote(rest)) } })
-  }
+    conds.into_iter().flat_map(|x| x.into_iter()).collect()
 }

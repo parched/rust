@@ -8,86 +8,28 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-#![feature(inclusive_range)]
-
 use std::ops::*;
 
-// FIXME #34229 duplicated errors
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 struct AllTheRanges {
     a: Range<usize>,
-    //~^ ERROR PartialOrd
-    //~^^ ERROR PartialOrd
-    //~^^^ ERROR Ord
-    //~^^^^ ERROR binary operation
-    //~^^^^^ ERROR binary operation
-    //~^^^^^^ ERROR binary operation
-    //~^^^^^^^ ERROR binary operation
-    //~^^^^^^^^ ERROR binary operation
-    //~^^^^^^^^^ ERROR binary operation
-    //~^^^^^^^^^^ ERROR binary operation
-    //~^^^^^^^^^^^ ERROR binary operation
+    //~^ ERROR can't compare
+    //~| ERROR Ord
     b: RangeTo<usize>,
-    //~^ ERROR PartialOrd
-    //~^^ ERROR PartialOrd
-    //~^^^ ERROR Ord
-    //~^^^^ ERROR binary operation
-    //~^^^^^ ERROR binary operation
-    //~^^^^^^ ERROR binary operation
-    //~^^^^^^^ ERROR binary operation
-    //~^^^^^^^^ ERROR binary operation
-    //~^^^^^^^^^ ERROR binary operation
-    //~^^^^^^^^^^ ERROR binary operation
-    //~^^^^^^^^^^^ ERROR binary operation
+    //~^ ERROR can't compare
+    //~| ERROR Ord
     c: RangeFrom<usize>,
-    //~^ ERROR PartialOrd
-    //~^^ ERROR PartialOrd
-    //~^^^ ERROR Ord
-    //~^^^^ ERROR binary operation
-    //~^^^^^ ERROR binary operation
-    //~^^^^^^ ERROR binary operation
-    //~^^^^^^^ ERROR binary operation
-    //~^^^^^^^^ ERROR binary operation
-    //~^^^^^^^^^ ERROR binary operation
-    //~^^^^^^^^^^ ERROR binary operation
-    //~^^^^^^^^^^^ ERROR binary operation
+    //~^ ERROR can't compare
+    //~| ERROR Ord
     d: RangeFull,
-    //~^ ERROR PartialOrd
-    //~^^ ERROR PartialOrd
-    //~^^^ ERROR Ord
-    //~^^^^ ERROR binary operation
-    //~^^^^^ ERROR binary operation
-    //~^^^^^^ ERROR binary operation
-    //~^^^^^^^ ERROR binary operation
-    //~^^^^^^^^ ERROR binary operation
-    //~^^^^^^^^^ ERROR binary operation
-    //~^^^^^^^^^^ ERROR binary operation
-    //~^^^^^^^^^^^ ERROR binary operation
+    //~^ ERROR can't compare
+    //~| ERROR Ord
     e: RangeInclusive<usize>,
-    //~^ ERROR PartialOrd
-    //~^^ ERROR PartialOrd
-    //~^^^ ERROR Ord
-    //~^^^^ ERROR binary operation
-    //~^^^^^ ERROR binary operation
-    //~^^^^^^ ERROR binary operation
-    //~^^^^^^^ ERROR binary operation
-    //~^^^^^^^^ ERROR binary operation
-    //~^^^^^^^^^ ERROR binary operation
-    //~^^^^^^^^^^ ERROR binary operation
-    //~^^^^^^^^^^^ ERROR binary operation
+    //~^ ERROR can't compare
+    //~| ERROR Ord
     f: RangeToInclusive<usize>,
-    //~^ ERROR PartialOrd
-    //~^^ ERROR PartialOrd
-    //~^^^ ERROR Ord
-    //~^^^^ ERROR binary operation
-    //~^^^^^ ERROR binary operation
-    //~^^^^^^ ERROR binary operation
-    //~^^^^^^^ ERROR binary operation
-    //~^^^^^^^^ ERROR binary operation
-    //~^^^^^^^^^ ERROR binary operation
-    //~^^^^^^^^^^ ERROR binary operation
-    //~^^^^^^^^^^^ ERROR binary operation
+    //~^ ERROR can't compare
+    //~| ERROR Ord
 }
 
 fn main() {}
-

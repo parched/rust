@@ -20,13 +20,14 @@ extern crate rustc_plugin;
 
 use std::borrow::ToOwned;
 use syntax::ast;
+use syntax::ext::hygiene;
 use syntax::ext::build::AstBuilder;
 use syntax::ext::base::{TTMacroExpander, ExtCtxt, MacResult, MacEager, NormalTT};
-use syntax::parse::token;
 use syntax::print::pprust;
 use syntax::ptr::P;
+use syntax::symbol::Symbol;
 use syntax_pos::Span;
-use syntax::tokenstream;
+use syntax::tokenstream::TokenStream;
 use rustc_plugin::Registry;
 
 struct Expander {
@@ -37,18 +38,24 @@ impl TTMacroExpander for Expander {
     fn expand<'cx>(&self,
                    ecx: &'cx mut ExtCtxt,
                    sp: Span,
-                   _: &[tokenstream::TokenTree]) -> Box<MacResult+'cx> {
+                   _: TokenStream) -> Box<MacResult+'cx> {
         let args = self.args.iter().map(|i| pprust::meta_list_item_to_string(i))
             .collect::<Vec<_>>().join(", ");
-        let interned = token::intern_and_get_ident(&args[..]);
-        MacEager::expr(ecx.expr_str(sp, interned))
+        MacEager::expr(ecx.expr_str(sp, Symbol::intern(&args)))
     }
 }
 
 #[plugin_registrar]
 pub fn plugin_registrar(reg: &mut Registry) {
     let args = reg.args().to_owned();
-    reg.register_syntax_extension(token::intern("plugin_args"),
-        // FIXME (#22405): Replace `Box::new` with `box` here when/if possible.
-        NormalTT(Box::new(Expander { args: args, }), None, false));
+    reg.register_syntax_extension(Symbol::intern("plugin_args"),
+        NormalTT {
+            expander: Box::new(Expander { args: args, }),
+            def_info: None,
+            allow_internal_unstable: false,
+            allow_internal_unsafe: false,
+            local_inner_macros: false,
+            unstable_feature: None,
+            edition: hygiene::default_edition(),
+        });
 }

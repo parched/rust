@@ -64,6 +64,7 @@
 // You'll find a few more details in the implementation, but that's the gist of
 // it!
 
+use fmt;
 use marker;
 use ptr;
 use sync::atomic::{AtomicUsize, AtomicBool, Ordering};
@@ -71,15 +72,18 @@ use thread::{self, Thread};
 
 /// A synchronization primitive which can be used to run a one-time global
 /// initialization. Useful for one-time initialization for FFI or related
-/// functionality. This type can only be constructed with the `ONCE_INIT`
-/// value.
+/// functionality. This type can only be constructed with the [`ONCE_INIT`]
+/// value or the equivalent [`Once::new`] constructor.
+///
+/// [`ONCE_INIT`]: constant.ONCE_INIT.html
+/// [`Once::new`]: struct.Once.html#method.new
 ///
 /// # Examples
 ///
 /// ```
-/// use std::sync::{Once, ONCE_INIT};
+/// use std::sync::Once;
 ///
-/// static START: Once = ONCE_INIT;
+/// static START: Once = Once::new();
 ///
 /// START.call_once(|| {
 ///     // run initialization here
@@ -100,14 +104,28 @@ unsafe impl Sync for Once {}
 #[stable(feature = "rust1", since = "1.0.0")]
 unsafe impl Send for Once {}
 
-/// State yielded to the `call_once_force` method which can be used to query
-/// whether the `Once` was previously poisoned or not.
+/// State yielded to [`call_once_force`]’s closure parameter. The state can be
+/// used to query the poison status of the [`Once`].
+///
+/// [`call_once_force`]: struct.Once.html#method.call_once_force
+/// [`Once`]: struct.Once.html
 #[unstable(feature = "once_poison", issue = "33577")]
+#[derive(Debug)]
 pub struct OnceState {
     poisoned: bool,
 }
 
-/// Initialization value for static `Once` values.
+/// Initialization value for static [`Once`] values.
+///
+/// [`Once`]: struct.Once.html
+///
+/// # Examples
+///
+/// ```
+/// use std::sync::{Once, ONCE_INIT};
+///
+/// static START: Once = ONCE_INIT;
+/// ```
 #[stable(feature = "rust1", since = "1.0.0")]
 pub const ONCE_INIT: Once = Once::new();
 
@@ -131,9 +149,9 @@ struct Waiter {
 
 // Helper struct used to clean up after a closure call with a `Drop`
 // implementation to also run on panic.
-struct Finish {
+struct Finish<'a> {
     panicked: bool,
-    me: &'static Once,
+    me: &'a Once,
 }
 
 impl Once {
@@ -163,10 +181,10 @@ impl Once {
     /// # Examples
     ///
     /// ```
-    /// use std::sync::{Once, ONCE_INIT};
+    /// use std::sync::Once;
     ///
     /// static mut VAL: usize = 0;
-    /// static INIT: Once = ONCE_INIT;
+    /// static INIT: Once = Once::new();
     ///
     /// // Accessing a `static mut` is unsafe much of the time, but if we do so
     /// // in a synchronized fashion (e.g. write once or read all) then we're
@@ -200,9 +218,13 @@ impl Once {
     ///
     /// [poison]: struct.Mutex.html#poisoning
     #[stable(feature = "rust1", since = "1.0.0")]
-    pub fn call_once<F>(&'static self, f: F) where F: FnOnce() {
+    pub fn call_once<F>(&self, f: F) where F: FnOnce() {
         // Fast path, just see if we've completed initialization.
-        if self.state.load(Ordering::SeqCst) == COMPLETE {
+        // An `Acquire` load is enough because that makes all the initialization
+        // operations visible to us. The cold path uses SeqCst consistently
+        // because the performance difference really does not matter there,
+        // and SeqCst minimizes the chances of something going wrong.
+        if self.state.load(Ordering::Acquire) == COMPLETE {
             return
         }
 
@@ -210,19 +232,60 @@ impl Once {
         self.call_inner(false, &mut |_| f.take().unwrap()());
     }
 
-    /// Performs the same function as `call_once` except ignores poisoning.
+    /// Performs the same function as [`call_once`] except ignores poisoning.
     ///
-    /// If this `Once` has been poisoned (some initialization panicked) then
-    /// this function will continue to attempt to call initialization functions
-    /// until one of them doesn't panic.
+    /// Unlike [`call_once`], if this `Once` has been poisoned (i.e. a previous
+    /// call to `call_once` or `call_once_force` caused a panic), calling
+    /// `call_once_force` will still invoke the closure `f` and will _not_
+    /// result in an immediate panic. If `f` panics, the `Once` will remain
+    /// in a poison state. If `f` does _not_ panic, the `Once` will no
+    /// longer be in a poison state and all future calls to `call_once` or
+    /// `call_one_force` will no-op.
     ///
-    /// The closure `f` is yielded a structure which can be used to query the
-    /// state of this `Once` (whether initialization has previously panicked or
-    /// not).
+    /// The closure `f` is yielded a [`OnceState`] structure which can be used
+    /// to query the poison status of the `Once`.
+    ///
+    /// [`call_once`]: struct.Once.html#method.call_once
+    /// [`OnceState`]: struct.OnceState.html
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// #![feature(once_poison)]
+    ///
+    /// use std::sync::Once;
+    /// use std::thread;
+    ///
+    /// static INIT: Once = Once::new();
+    ///
+    /// // poison the once
+    /// let handle = thread::spawn(|| {
+    ///     INIT.call_once(|| panic!());
+    /// });
+    /// assert!(handle.join().is_err());
+    ///
+    /// // poisoning propagates
+    /// let handle = thread::spawn(|| {
+    ///     INIT.call_once(|| {});
+    /// });
+    /// assert!(handle.join().is_err());
+    ///
+    /// // call_once_force will still run and reset the poisoned state
+    /// INIT.call_once_force(|state| {
+    ///     assert!(state.poisoned());
+    /// });
+    ///
+    /// // once any success happens, we stop propagating the poison
+    /// INIT.call_once(|| {});
+    /// ```
     #[unstable(feature = "once_poison", issue = "33577")]
-    pub fn call_once_force<F>(&'static self, f: F) where F: FnOnce(&OnceState) {
+    pub fn call_once_force<F>(&self, f: F) where F: FnOnce(&OnceState) {
         // same as above, just with a different parameter to `call_inner`.
-        if self.state.load(Ordering::SeqCst) == COMPLETE {
+        // An `Acquire` load is enough because that makes all the initialization
+        // operations visible to us. The cold path uses SeqCst consistently
+        // because the performance difference really does not matter there,
+        // and SeqCst minimizes the chances of something going wrong.
+        if self.state.load(Ordering::Acquire) == COMPLETE {
             return
         }
 
@@ -244,9 +307,9 @@ impl Once {
     // currently no way to take an `FnOnce` and call it via virtual dispatch
     // without some allocation overhead.
     #[cold]
-    fn call_inner(&'static self,
+    fn call_inner(&self,
                   ignore_poisoning: bool,
-                  mut init: &mut FnMut(bool)) {
+                  init: &mut dyn FnMut(bool)) {
         let mut state = self.state.load(Ordering::SeqCst);
 
         'outer: loop {
@@ -314,7 +377,7 @@ impl Once {
                         }
 
                         // Once we've enqueued ourselves, wait in a loop.
-                        // Aftewards reload the state and continue with what we
+                        // Afterwards reload the state and continue with what we
                         // were doing from before.
                         while !node.signaled.load(Ordering::SeqCst) {
                             thread::park();
@@ -328,7 +391,14 @@ impl Once {
     }
 }
 
-impl Drop for Finish {
+#[stable(feature = "std_debug", since = "1.16.0")]
+impl fmt::Debug for Once {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.pad("Once { .. }")
+    }
+}
+
+impl<'a> Drop for Finish<'a> {
     fn drop(&mut self) {
         // Swap out our state with however we finished. We should only ever see
         // an old state which was RUNNING.
@@ -357,17 +427,54 @@ impl Drop for Finish {
 }
 
 impl OnceState {
-    /// Returns whether the associated `Once` has been poisoned.
+    /// Returns whether the associated [`Once`] was poisoned prior to the
+    /// invocation of the closure passed to [`call_once_force`].
     ///
-    /// Once an initalization routine for a `Once` has panicked it will forever
-    /// indicate to future forced initialization routines that it is poisoned.
+    /// [`call_once_force`]: struct.Once.html#method.call_once_force
+    /// [`Once`]: struct.Once.html
+    ///
+    /// # Examples
+    ///
+    /// A poisoned `Once`:
+    ///
+    /// ```
+    /// #![feature(once_poison)]
+    ///
+    /// use std::sync::Once;
+    /// use std::thread;
+    ///
+    /// static INIT: Once = Once::new();
+    ///
+    /// // poison the once
+    /// let handle = thread::spawn(|| {
+    ///     INIT.call_once(|| panic!());
+    /// });
+    /// assert!(handle.join().is_err());
+    ///
+    /// INIT.call_once_force(|state| {
+    ///     assert!(state.poisoned());
+    /// });
+    /// ```
+    ///
+    /// An unpoisoned `Once`:
+    ///
+    /// ```
+    /// #![feature(once_poison)]
+    ///
+    /// use std::sync::Once;
+    ///
+    /// static INIT: Once = Once::new();
+    ///
+    /// INIT.call_once_force(|state| {
+    ///     assert!(!state.poisoned());
+    /// });
     #[unstable(feature = "once_poison", issue = "33577")]
     pub fn poisoned(&self) -> bool {
         self.poisoned
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_os = "emscripten")))]
 mod tests {
     use panic;
     use sync::mpsc::channel;
@@ -387,7 +494,7 @@ mod tests {
     #[test]
     fn stampede_once() {
         static O: Once = Once::new();
-        static mut run: bool = false;
+        static mut RUN: bool = false;
 
         let (tx, rx) = channel();
         for _ in 0..10 {
@@ -396,10 +503,10 @@ mod tests {
                 for _ in 0..4 { thread::yield_now() }
                 unsafe {
                     O.call_once(|| {
-                        assert!(!run);
-                        run = true;
+                        assert!(!RUN);
+                        RUN = true;
                     });
-                    assert!(run);
+                    assert!(RUN);
                 }
                 tx.send(()).unwrap();
             });
@@ -407,10 +514,10 @@ mod tests {
 
         unsafe {
             O.call_once(|| {
-                assert!(!run);
-                run = true;
+                assert!(!RUN);
+                RUN = true;
             });
-            assert!(run);
+            assert!(RUN);
         }
 
         for _ in 0..10 {

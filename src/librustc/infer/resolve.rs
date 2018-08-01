@@ -10,7 +10,7 @@
 
 use super::{InferCtxt, FixupError, FixupResult};
 use ty::{self, Ty, TyCtxt, TypeFoldable};
-use ty::fold::TypeFolder;
+use ty::fold::{TypeFolder, TypeVisitor};
 
 ///////////////////////////////////////////////////////////////////////////
 // OPPORTUNISTIC TYPE RESOLVER
@@ -46,7 +46,7 @@ impl<'a, 'gcx, 'tcx> TypeFolder<'gcx, 'tcx> for OpportunisticTypeResolver<'a, 'g
 }
 
 /// The opportunistic type and region resolver is similar to the
-/// opportunistic type resolver, but also opportunistly resolves
+/// opportunistic type resolver, but also opportunistically resolves
 /// regions. It is useful for canonicalization.
 pub struct OpportunisticTypeAndRegionResolver<'a, 'gcx: 'a+'tcx, 'tcx: 'a> {
     infcx: &'a InferCtxt<'a, 'gcx, 'tcx>,
@@ -72,10 +72,50 @@ impl<'a, 'gcx, 'tcx> TypeFolder<'gcx, 'tcx> for OpportunisticTypeAndRegionResolv
         }
     }
 
-    fn fold_region(&mut self, r: &'tcx ty::Region) -> &'tcx ty::Region {
+    fn fold_region(&mut self, r: ty::Region<'tcx>) -> ty::Region<'tcx> {
         match *r {
-            ty::ReVar(rid) => self.infcx.region_vars.opportunistic_resolve_var(rid),
-            _ => r,
+            ty::ReVar(rid) =>
+                self.infcx.borrow_region_constraints()
+                          .opportunistic_resolve_var(self.tcx(), rid),
+            _ =>
+                r,
+        }
+    }
+}
+
+///////////////////////////////////////////////////////////////////////////
+// UNRESOLVED TYPE FINDER
+
+/// The unresolved type **finder** walks your type and searches for
+/// type variables that don't yet have a value. They get pushed into a
+/// vector. It does not construct the fully resolved type (which might
+/// involve some hashing and so forth).
+pub struct UnresolvedTypeFinder<'a, 'gcx: 'a+'tcx, 'tcx: 'a> {
+    infcx: &'a InferCtxt<'a, 'gcx, 'tcx>,
+}
+
+impl<'a, 'gcx, 'tcx> UnresolvedTypeFinder<'a, 'gcx, 'tcx> {
+    pub fn new(infcx: &'a InferCtxt<'a, 'gcx, 'tcx>) -> Self {
+        UnresolvedTypeFinder { infcx }
+    }
+}
+
+impl<'a, 'gcx, 'tcx> TypeVisitor<'tcx> for UnresolvedTypeFinder<'a, 'gcx, 'tcx> {
+    fn visit_ty(&mut self, t: Ty<'tcx>) -> bool {
+        let t = self.infcx.shallow_resolve(t);
+        if t.has_infer_types() {
+            if let ty::TyInfer(_) = t.sty {
+                // Since we called `shallow_resolve` above, this must
+                // be an (as yet...) unresolved inference variable.
+                true
+            } else {
+                // Otherwise, visit its contents.
+                t.super_visit_with(self)
+            }
+        } else {
+            // Micro-optimize: no inference types at all Can't have unresolved type
+            // variables, no need to visit the contents.
+            false
         }
     }
 }
@@ -111,8 +151,10 @@ impl<'a, 'gcx, 'tcx> TypeFolder<'gcx, 'tcx> for FullTypeResolver<'a, 'gcx, 'tcx>
     }
 
     fn fold_ty(&mut self, t: Ty<'tcx>) -> Ty<'tcx> {
-        if !t.needs_infer() {
+        if !t.needs_infer() && !ty::keep_local(&t) {
             t // micro-optimize -- if there is nothing in this type that this fold affects...
+                // ^ we need to have the `keep_local` check to un-default
+                // defaulted tuples.
         } else {
             let t = self.infcx.shallow_resolve(t);
             match t.sty {
@@ -138,9 +180,13 @@ impl<'a, 'gcx, 'tcx> TypeFolder<'gcx, 'tcx> for FullTypeResolver<'a, 'gcx, 'tcx>
         }
     }
 
-    fn fold_region(&mut self, r: &'tcx ty::Region) -> &'tcx ty::Region {
+    fn fold_region(&mut self, r: ty::Region<'tcx>) -> ty::Region<'tcx> {
         match *r {
-            ty::ReVar(rid) => self.infcx.region_vars.resolve_var(rid),
+            ty::ReVar(rid) => self.infcx.lexical_region_resolutions
+                                        .borrow()
+                                        .as_ref()
+                                        .expect("region resolution not performed")
+                                        .resolve_var(rid),
             _ => r,
         }
     }

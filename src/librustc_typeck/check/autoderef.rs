@@ -10,23 +10,25 @@
 
 use astconv::AstConv;
 
-use super::FnCtxt;
+use super::{FnCtxt, PlaceOp, Needs};
+use super::method::MethodCallee;
 
+use rustc::infer::InferOk;
+use rustc::session::DiagnosticMessageId;
 use rustc::traits;
 use rustc::ty::{self, Ty, TraitRef};
 use rustc::ty::{ToPredicate, TypeFoldable};
-use rustc::ty::{MethodCall, MethodCallee};
-use rustc::ty::subst::Substs;
-use rustc::ty::{LvaluePreference, NoPreference, PreferMutLvalue};
-use rustc::hir;
+use rustc::ty::adjustment::{Adjustment, Adjust, OverloadedDeref};
 
 use syntax_pos::Span;
-use syntax::parse::token;
+use syntax::ast::Ident;
+
+use std::iter;
 
 #[derive(Copy, Clone, Debug)]
 enum AutoderefKind {
     Builtin,
-    Overloaded
+    Overloaded,
 }
 
 pub struct Autoderef<'a, 'gcx: 'tcx, 'tcx: 'a> {
@@ -35,7 +37,8 @@ pub struct Autoderef<'a, 'gcx: 'tcx, 'tcx: 'a> {
     cur_ty: Ty<'tcx>,
     obligations: Vec<traits::PredicateObligation<'tcx>>,
     at_start: bool,
-    span: Span
+    include_raw_pointers: bool,
+    span: Span,
 }
 
 impl<'a, 'gcx, 'tcx> Iterator for Autoderef<'a, 'gcx, 'tcx> {
@@ -45,20 +48,33 @@ impl<'a, 'gcx, 'tcx> Iterator for Autoderef<'a, 'gcx, 'tcx> {
         let tcx = self.fcx.tcx;
 
         debug!("autoderef: steps={:?}, cur_ty={:?}",
-               self.steps, self.cur_ty);
+               self.steps,
+               self.cur_ty);
         if self.at_start {
             self.at_start = false;
             debug!("autoderef stage #0 is {:?}", self.cur_ty);
             return Some((self.cur_ty, 0));
         }
 
-        if self.steps.len() == tcx.sess.recursion_limit.get() {
+        if self.steps.len() >= *tcx.sess.recursion_limit.get() {
             // We've reached the recursion limit, error gracefully.
-            struct_span_err!(tcx.sess, self.span, E0055,
-                      "reached the recursion limit while auto-dereferencing {:?}",
-                      self.cur_ty)
-                      .span_label(self.span, &format!("deref recursion limit reached"))
-                      .emit();
+            let suggested_limit = *tcx.sess.recursion_limit.get() * 2;
+            let msg = format!("reached the recursion limit while auto-dereferencing {:?}",
+                              self.cur_ty);
+            let error_id = (DiagnosticMessageId::ErrorId(55), Some(self.span), msg.clone());
+            let fresh = tcx.sess.one_time_diagnostics.borrow_mut().insert(error_id);
+            if fresh {
+                struct_span_err!(tcx.sess,
+                                 self.span,
+                                 E0055,
+                                 "reached the recursion limit while auto-dereferencing {:?}",
+                                 self.cur_ty)
+                    .span_label(self.span, "deref recursion limit reached")
+                    .help(&format!(
+                        "consider adding a `#![recursion_limit=\"{}\"]` attribute to your crate",
+                        suggested_limit))
+                    .emit();
+            }
             return None;
         }
 
@@ -67,22 +83,23 @@ impl<'a, 'gcx, 'tcx> Iterator for Autoderef<'a, 'gcx, 'tcx> {
         }
 
         // Otherwise, deref if type is derefable:
-        let (kind, new_ty) = if let Some(mt) = self.cur_ty.builtin_deref(false, NoPreference) {
-            (AutoderefKind::Builtin, mt.ty)
-        } else {
-            match self.overloaded_deref_ty(self.cur_ty) {
-                Some(ty) => (AutoderefKind::Overloaded, ty),
-                _ => return None
-            }
-        };
+        let (kind, new_ty) =
+            if let Some(mt) = self.cur_ty.builtin_deref(self.include_raw_pointers) {
+                (AutoderefKind::Builtin, mt.ty)
+            } else {
+                let ty = self.overloaded_deref_ty(self.cur_ty)?;
+                (AutoderefKind::Overloaded, ty)
+            };
 
         if new_ty.references_error() {
             return None;
         }
 
         self.steps.push((self.cur_ty, kind));
-        debug!("autoderef stage #{:?} is {:?} from {:?}", self.steps.len(),
-               new_ty, (self.cur_ty, kind));
+        debug!("autoderef stage #{:?} is {:?} from {:?}",
+               self.steps.len(),
+               new_ty,
+               (self.cur_ty, kind));
         self.cur_ty = new_ty;
 
         Some((self.cur_ty, self.steps.len()))
@@ -97,116 +114,131 @@ impl<'a, 'gcx, 'tcx> Autoderef<'a, 'gcx, 'tcx> {
 
         // <cur_ty as Deref>
         let trait_ref = TraitRef {
-            def_id: match tcx.lang_items.deref_trait() {
-                Some(f) => f,
-                None => return None
-            },
-            substs: Substs::new_trait(tcx, self.cur_ty, &[])
+            def_id: tcx.lang_items().deref_trait()?,
+            substs: tcx.mk_substs_trait(self.cur_ty, &[]),
         };
 
         let cause = traits::ObligationCause::misc(self.span, self.fcx.body_id);
 
-        let mut selcx = traits::SelectionContext::new(self.fcx);
-        let obligation = traits::Obligation::new(cause.clone(), trait_ref.to_predicate());
-        if !selcx.evaluate_obligation(&obligation) {
+        let obligation = traits::Obligation::new(cause.clone(),
+                                                 self.fcx.param_env,
+                                                 trait_ref.to_predicate());
+        if !self.fcx.predicate_may_hold(&obligation) {
             debug!("overloaded_deref_ty: cannot match obligation");
             return None;
         }
 
-        let normalized = traits::normalize_projection_type(
-            &mut selcx,
-            ty::ProjectionTy {
-                trait_ref: trait_ref,
-                item_name: token::intern("Target")
-            },
-            cause,
-            0
-        );
+        let mut selcx = traits::SelectionContext::new(self.fcx);
+        let normalized_ty = traits::normalize_projection_type(&mut selcx,
+                                                              self.fcx.param_env,
+                                                              ty::ProjectionTy::from_ref_and_name(
+                                                                  tcx,
+                                                                  trait_ref,
+                                                                  Ident::from_str("Target"),
+                                                              ),
+                                                              cause,
+                                                              0,
+                                                              &mut self.obligations);
 
-        debug!("overloaded_deref_ty({:?}) = {:?}", ty, normalized);
-        self.obligations.extend(normalized.obligations);
+        debug!("overloaded_deref_ty({:?}) = {:?}", ty, normalized_ty);
 
-        Some(self.fcx.resolve_type_vars_if_possible(&normalized.value))
+        Some(self.fcx.resolve_type_vars_if_possible(&normalized_ty))
     }
 
+    /// Returns the final type, generating an error if it is an
+    /// unresolved inference variable.
     pub fn unambiguous_final_ty(&self) -> Ty<'tcx> {
         self.fcx.structurally_resolved_type(self.span, self.cur_ty)
     }
 
-    pub fn finalize<'b, I>(self, pref: LvaluePreference, exprs: I)
-        where I: IntoIterator<Item=&'b hir::Expr>
-    {
-        let methods : Vec<_> = self.steps.iter().map(|&(ty, kind)| {
+    /// Returns the final type we ended up with, which may well be an
+    /// inference variable (we will resolve it first, if possible).
+    pub fn maybe_ambiguous_final_ty(&self) -> Ty<'tcx> {
+        self.fcx.resolve_type_vars_if_possible(&self.cur_ty)
+    }
+
+    pub fn step_count(&self) -> usize {
+        self.steps.len()
+    }
+
+    /// Returns the adjustment steps.
+    pub fn adjust_steps(&self, needs: Needs)
+                        -> Vec<Adjustment<'tcx>> {
+        self.fcx.register_infer_ok_obligations(self.adjust_steps_as_infer_ok(needs))
+    }
+
+    pub fn adjust_steps_as_infer_ok(&self, needs: Needs)
+                                    -> InferOk<'tcx, Vec<Adjustment<'tcx>>> {
+        let mut obligations = vec![];
+        let targets = self.steps.iter().skip(1).map(|&(ty, _)| ty)
+            .chain(iter::once(self.cur_ty));
+        let steps: Vec<_> = self.steps.iter().map(|&(source, kind)| {
             if let AutoderefKind::Overloaded = kind {
-                self.fcx.try_overloaded_deref(self.span, None, ty, pref)
+                self.fcx.try_overloaded_deref(self.span, source, needs)
+                    .and_then(|InferOk { value: method, obligations: o }| {
+                        obligations.extend(o);
+                        if let ty::TyRef(region, _, mutbl) = method.sig.output().sty {
+                            Some(OverloadedDeref {
+                                region,
+                                mutbl,
+                            })
+                        } else {
+                            None
+                        }
+                    })
             } else {
                 None
             }
+        }).zip(targets).map(|(autoderef, target)| {
+            Adjustment {
+                kind: Adjust::Deref(autoderef),
+                target
+            }
         }).collect();
 
-        debug!("finalize({:?}) - {:?},{:?}", pref, methods, self.obligations);
-
-        for expr in exprs {
-            debug!("finalize - finalizing #{} - {:?}", expr.id, expr);
-            for (n, method) in methods.iter().enumerate() {
-                if let &Some(method) = method {
-                    let method_call = MethodCall::autoderef(expr.id, n as u32);
-                    self.fcx.tables.borrow_mut().method_map.insert(method_call, method);
-                }
-            }
+        InferOk {
+            obligations,
+            value: steps
         }
+    }
 
-        for obligation in self.obligations {
-            self.fcx.register_predicate(obligation);
-        }
+    /// also dereference through raw pointer types
+    /// e.g. assuming ptr_to_Foo is the type `*const Foo`
+    /// fcx.autoderef(span, ptr_to_Foo)  => [*const Foo]
+    /// fcx.autoderef(span, ptr_to_Foo).include_raw_ptrs() => [*const Foo, Foo]
+    pub fn include_raw_pointers(mut self) -> Self {
+        self.include_raw_pointers = true;
+        self
+    }
+
+    pub fn finalize(self) {
+        let fcx = self.fcx;
+        fcx.register_predicates(self.into_obligations());
+    }
+
+    pub fn into_obligations(self) -> Vec<traits::PredicateObligation<'tcx>> {
+        self.obligations
     }
 }
 
 impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
-    pub fn autoderef(&'a self,
-                     span: Span,
-                     base_ty: Ty<'tcx>)
-                     -> Autoderef<'a, 'gcx, 'tcx>
-    {
+    pub fn autoderef(&'a self, span: Span, base_ty: Ty<'tcx>) -> Autoderef<'a, 'gcx, 'tcx> {
         Autoderef {
             fcx: self,
             steps: vec![],
             cur_ty: self.resolve_type_vars_if_possible(&base_ty),
             obligations: vec![],
             at_start: true,
-            span: span
+            include_raw_pointers: false,
+            span,
         }
     }
 
     pub fn try_overloaded_deref(&self,
                                 span: Span,
-                                base_expr: Option<&hir::Expr>,
                                 base_ty: Ty<'tcx>,
-                                lvalue_pref: LvaluePreference)
-                                -> Option<MethodCallee<'tcx>>
-    {
-        debug!("try_overloaded_deref({:?},{:?},{:?},{:?})",
-               span, base_expr, base_ty, lvalue_pref);
-        // Try DerefMut first, if preferred.
-        let method = match (lvalue_pref, self.tcx.lang_items.deref_mut_trait()) {
-            (PreferMutLvalue, Some(trait_did)) => {
-                self.lookup_method_in_trait(span, base_expr,
-                                            token::intern("deref_mut"), trait_did,
-                                            base_ty, None)
-            }
-            _ => None
-        };
-
-        // Otherwise, fall back to Deref.
-        let method = match (method, self.tcx.lang_items.deref_trait()) {
-            (None, Some(trait_did)) => {
-                self.lookup_method_in_trait(span, base_expr,
-                                            token::intern("deref"), trait_did,
-                                            base_ty, None)
-            }
-            (method, _) => method
-        };
-
-        method
+                                needs: Needs)
+                                -> Option<InferOk<'tcx, MethodCallee<'tcx>>> {
+        self.try_overloaded_place_op(span, base_ty, &[], needs, PlaceOp::Deref)
     }
 }

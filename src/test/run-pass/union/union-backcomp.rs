@@ -8,7 +8,11 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-#![feature(untagged_unions)]
+macro_rules! union {
+    () => (struct S;)
+}
+
+union!();
 
 fn union() {}
 

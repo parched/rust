@@ -6,30 +6,48 @@ version = "0.0.0"
 [lib]
 name = "bootstrap"
 path = "lib.rs"
+doctest = false
 
 [[bin]]
 name = "bootstrap"
 path = "bin/main.rs"
+test = false
 
 [[bin]]
 name = "rustc"
 path = "bin/rustc.rs"
+test = false
 
 [[bin]]
 name = "rustdoc"
 path = "bin/rustdoc.rs"
+test = false
+
+[[bin]]
+name = "sccache-plus-cl"
+path = "bin/sccache-plus-cl.rs"
+test = false
+
+[[bin]]
+name = "llvm-config-wrapper"
+path = "bin/llvm-config-wrapper.rs"
+test = false
 
 [dependencies]
 build_helper = { path = "../build_helper" }
-cmake = "0.1.17"
-filetime = "0.1"
-num_cpus = "0.2"
-toml = "0.1"
+cmake = "0.1.23"
+filetime = "0.2"
+num_cpus = "1.0"
 getopts = "0.2"
-rustc-serialize = "0.3"
-winapi = "0.2"
-kernel32-sys = "0.2"
-gcc = { git = "https://github.com/alexcrichton/gcc-rs" }
+cc = "1.0.1"
 libc = "0.2"
-md5 = "0.1"
-regex = "0.1.73"
+serde = "1.0.8"
+serde_derive = "1.0.8"
+serde_json = "1.0.2"
+toml = "0.4"
+lazy_static = "0.2"
+time = "0.1"
+petgraph = "0.4.12"
+
+[dev-dependencies]
+pretty_assertions = "0.5"

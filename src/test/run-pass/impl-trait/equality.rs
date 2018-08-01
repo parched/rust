@@ -8,7 +8,7 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-#![feature(conservative_impl_trait, specialization)]
+#![feature(specialization)]
 
 trait Foo: std::fmt::Debug + Eq {}
 
@@ -28,6 +28,17 @@ impl<T> Leak<T> for T {
     fn leak(self) -> T { self }
 }
 
+trait CheckIfSend: Sized {
+    type T: Default;
+    fn check(self) -> Self::T { Default::default() }
+}
+impl<T> CheckIfSend for T {
+    default type T = ();
+}
+impl<T: Send> CheckIfSend for T {
+    type T = bool;
+}
+
 fn lucky_seven() -> impl Fn(usize) -> u8 {
     let a = [1, 2, 3, 4, 5, 6, 7];
     move |i| a[i]
@@ -40,4 +51,6 @@ fn main() {
     assert_eq!(std::mem::size_of_val(&lucky_seven()), 7);
 
     assert_eq!(Leak::<i32>::leak(hide(5_i32)), 5_i32);
+
+    assert_eq!(CheckIfSend::check(hide(0_i32)), false);
 }

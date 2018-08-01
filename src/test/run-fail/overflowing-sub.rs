@@ -8,10 +8,10 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-// ignore-pretty : (#23623) problems when  ending with // comments
-
 // error-pattern:thread 'main' panicked at 'attempt to subtract with overflow'
 // compile-flags: -C debug-assertions
+
+#![allow(const_err)]
 
 fn main() {
     let _x = 42u8 - (42u8 + 1);

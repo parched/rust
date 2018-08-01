@@ -9,7 +9,8 @@
 // except according to those terms.
 
 // ignore-windows - this is a unix-specific test
-// ignore-emscripten
+// ignore-cloudabi no processes
+// ignore-emscripten no processes
 
 #![feature(process_exec, libc)]
 

@@ -15,15 +15,42 @@
 // use `gq` to wrap paragraphs. Use `:set tw=0` to disable.
 register_long_diagnostics! {
 
+E0128: r##"
+Type parameter defaults can only use parameters that occur before them.
+Erroneous code example:
+
+```compile_fail,E0128
+struct Foo<T=U, U=()> {
+    field1: T,
+    filed2: U,
+}
+// error: type parameters with a default cannot use forward declared
+// identifiers
+```
+
+Since type parameters are evaluated in-order, you may be able to fix this issue
+by doing:
+
+```
+struct Foo<U=(), T=U> {
+    field1: T,
+    filed2: U,
+}
+```
+
+Please also verify that this wasn't because of a name-clash and rename the type
+parameter if so.
+"##,
+
 E0154: r##"
-## Note: this error code is no longer emitted by the compiler.
+#### Note: this error code is no longer emitted by the compiler.
 
 Imports (`use` statements) are not allowed after non-item statements, such as
 variable declarations and expression statements.
 
 Here is an example that demonstrates the error:
 
-```ignore
+```
 fn f() {
     // Variable declaration before import
     let x = 0;
@@ -52,14 +79,14 @@ https://doc.rust-lang.org/reference.html#statements
 "##,
 
 E0251: r##"
-## Note: this error code is no longer emitted by the compiler.
+#### Note: this error code is no longer emitted by the compiler.
 
 Two items of the same name cannot be imported without rebinding one of the
 items under a new local name.
 
 An example of this error:
 
-```compile_fail
+```
 use foo::baz;
 use bar::*; // error, do `use foo::baz as quux` instead on the previous line
 
@@ -161,16 +188,16 @@ already been imported.
 Erroneous code example:
 
 ```compile_fail,E0254
-extern crate collections;
+extern crate core;
 
 mod foo {
-    pub trait collections {
+    pub trait core {
         fn do_something();
     }
 }
 
-use foo::collections; // error: an extern crate named `collections` has already
-                      //        been imported in this module
+use foo::core;  // error: an extern crate named `core` has already
+                //        been imported in this module
 
 fn main() {}
 ```
@@ -178,16 +205,16 @@ fn main() {}
 To fix issue issue, you have to rename at least one of the two imports.
 Example:
 
-```ignore
-extern crate collections as libcollections; // ok!
+```
+extern crate core as libcore; // ok!
 
 mod foo {
-    pub trait collections {
+    pub trait core {
         fn do_something();
     }
 }
 
-use foo::collections;
+use foo::core;
 
 fn main() {}
 ```
@@ -241,7 +268,7 @@ fn main() {
 "##,
 
 E0256: r##"
-## Note: this error code is no longer emitted by the compiler.
+#### Note: this error code is no longer emitted by the compiler.
 
 You can't import a type or module when the name of the item being imported is
 the same as another type or submodule defined in the module.
@@ -268,8 +295,9 @@ that has been imported into the current module.
 Erroneous code example:
 
 ```compile_fail,E0259
-extern crate std;
-extern crate libc as std;
+# #![feature(libc)]
+extern crate core;
+extern crate libc as core;
 
 fn main() {}
 ```
@@ -279,9 +307,12 @@ external crate imported into the current module.
 
 Correct example:
 
-```ignore
-extern crate std;
+```
+# #![feature(libc)]
+extern crate core;
 extern crate libc as other_name;
+
+fn main() {}
 ```
 "##,
 
@@ -290,26 +321,28 @@ The name for an item declaration conflicts with an external crate's name.
 
 Erroneous code example:
 
-```ignore,E0260
-extern crate abc;
+```compile_fail,E0260
+extern crate core;
 
-struct abc;
+struct core;
+
+fn main() {}
 ```
 
 There are two possible solutions:
 
 Solution #1: Rename the item.
 
-```ignore
-extern crate abc;
+```
+extern crate core;
 
 struct xyz;
 ```
 
 Solution #2: Import the crate with a different name.
 
-```ignore
-extern crate abc as xyz;
+```
+extern crate core as xyz;
 
 struct abc;
 ```
@@ -482,7 +515,8 @@ This may require additional type hints in the function body.
 In case the item is a function inside an `impl`, defining a private helper
 function might be easier:
 
-```ignore
+```
+# struct Foo<T>(T);
 impl<T> Foo<T> {
     pub fn foo(&self, x: T) {
         self.bar(x);
@@ -508,7 +542,7 @@ fn foo<T, T>(s: T, u: T) {} // error: the name `T` is already used for a type
                             //        parameter in this type parameter list
 ```
 
-Please verify that none of the type parameterss are misspelled, and rename any
+Please verify that none of the type parameters are misspelled, and rename any
 clashing parameters. Example:
 
 ```
@@ -517,7 +551,8 @@ fn foo<T, Y>(s: T, u: Y) {} // ok!
 "##,
 
 E0404: r##"
-You tried to implement something which was not a trait on an object.
+You tried to use something which is not a trait in a trait position, such as
+a bound or `impl`.
 
 Erroneous code example:
 
@@ -526,6 +561,14 @@ struct Foo;
 struct Bar;
 
 impl Foo for Bar {} // error: `Foo` is not a trait
+```
+
+Another erroneous code example:
+
+```compile_fail,E0404
+struct Foo;
+
+fn bar<T: Foo>(t: T) {} // error: `Foo` is not a trait
 ```
 
 Please verify that you didn't misspell the trait's name or otherwise use the
@@ -541,6 +584,17 @@ impl Foo for Bar { // ok!
     // functions implementation
 }
 ```
+
+or
+
+```
+trait Foo {
+    // some functions
+}
+
+fn bar<T: Foo>(t: T) {} // ok!
+```
+
 "##,
 
 E0405: r##"
@@ -557,7 +611,8 @@ impl SomeTrait for Foo {} // error: trait `SomeTrait` is not in scope
 Please verify that the name of the trait wasn't misspelled and ensure that it
 was imported. Example:
 
-```ignore
+```
+# #[cfg(for_demonstration_only)]
 // solution 1:
 use some_file::SomeTrait;
 
@@ -694,7 +749,7 @@ Here, `y` is bound by-value in one case and by-reference in the other.
 To fix this error, just use the same mode in both cases.
 Generally using `ref` or `ref mut` where not already used will fix this:
 
-```ignore
+```
 let x = (0, 2);
 match x {
     (0, ref y) | (ref y, 0) => { /* use y */}
@@ -804,12 +859,38 @@ impl Something {} // ok!
 trait Foo {
     type N;
 
-    fn bar(Self::N); // ok!
+    fn bar(_: Self::N); // ok!
 }
 
 // or:
 
 fn foo<T>(x: T) {} // ok!
+```
+
+Another case that causes this error is when a type is imported into a parent
+module. To fix this, you can follow the suggestion and use File directly or
+`use super::File;` which will import the types from the parent namespace. An
+example that causes this error is below:
+
+```compile_fail,E0412
+use std::fs::File;
+
+mod foo {
+    fn some_function(f: File) {}
+}
+```
+
+```
+use std::fs::File;
+
+mod foo {
+    // either
+    use super::File;
+    // or
+    // use std::fs::File;
+    fn foo(f: File) {}
+}
+# fn main() {} // don't insert it for us; that'll break imports
 ```
 "##,
 
@@ -852,7 +933,8 @@ match (1, 2) {
 
 Or maybe did you mean to unify? Consider using a guard:
 
-```ignore
+```
+# let (A, B, C) = (1, 2, 3);
 match (A, B, C) {
     (x, x2, see) if x == x2 => { /* A and B are equal, do one thing */ }
     (y, z, see) => { /* A and B unequal; do another thing */ }
@@ -862,10 +944,9 @@ match (A, B, C) {
 
 E0422: r##"
 You are trying to use an identifier that is either undefined or not a struct.
-
 Erroneous code example:
 
-``` compile_fail,E0422
+```compile_fail,E0422
 fn main () {
     let x = Foo { x: 1, y: 2 };
 }
@@ -874,7 +955,7 @@ fn main () {
 In this case, `Foo` is undefined, so it inherently isn't anything, and
 definitely not a struct.
 
-```compile_fail,E0422
+```compile_fail
 fn main () {
     let foo = 1;
     let x = foo { x: 1, y: 2 };
@@ -886,16 +967,18 @@ one.
 "##,
 
 E0423: r##"
-A `struct` variant name was used like a function name.
+An identifier was used like a function name or a value was expected and the
+identifier exists but it belongs to a different namespace.
 
-Erroneous code example:
+For (an erroneous) example, here a `struct` variant name were used as a
+function:
 
 ```compile_fail,E0423
 struct Foo { a: bool };
 
 let f = Foo();
-// error: `Foo` is a struct variant name, but this expression uses
-//        it like a function name
+// error: expected function, found `Foo`
+// `Foo` is a struct name, but this expression uses it like a function name
 ```
 
 Please verify you didn't misspell the name of what you actually wanted to use
@@ -905,6 +988,30 @@ here. Example:
 fn Foo() -> u32 { 0 }
 
 let f = Foo(); // ok!
+```
+
+It is common to forget the trailing `!` on macro invocations, which would also
+yield this error:
+
+```compile_fail,E0423
+println("");
+// error: expected function, found macro `println`
+// did you mean `println!(...)`? (notice the trailing `!`)
+```
+
+Another case where this error is emitted is when a value is expected, but
+something else is found:
+
+```compile_fail,E0423
+pub mod a {
+    pub const I: i32 = 1;
+}
+
+fn h1() -> i32 {
+    a.I
+    //~^ ERROR expected value, found module `a`
+    // did you mean `a::I`?
+}
 ```
 "##,
 
@@ -993,9 +1100,12 @@ let x = unknown_variable; // ok!
 If the item is not defined in the current module, it must be imported using a
 `use` statement, like so:
 
-```ignore
+```
+# mod foo { pub fn bar() {} }
+# fn main() {
 use foo::bar;
 bar();
+# }
 ```
 
 If the item you are importing is not defined in some super-module of the
@@ -1078,8 +1188,11 @@ use something::{self, self}; // error: `self` import can only appear once in
 Please verify you didn't misspell the import name or remove the duplicated
 `self` import. Example:
 
-```ignore
-use something::self; // ok!
+```
+# mod something {}
+# fn main() {
+use something::{self}; // ok!
+# }
 ```
 "##,
 
@@ -1112,21 +1225,23 @@ prefixes, respectively. Also verify that you didn't misspell the import
 name and that the import exists in the module from where you tried to
 import it. Example:
 
-```ignore
+```
 use self::something::Foo; // ok!
 
 mod something {
     pub struct Foo;
 }
+# fn main() {}
 ```
 
 Or, if you tried to use a module from an external crate, you may have missed
 the `extern crate` declaration (which is usually placed in the crate root):
 
-```ignore
-extern crate homura; // Required to use the `homura` crate
+```
+extern crate core; // Required to use the `core` crate
 
-use homura::Madoka;
+use core::any;
+# fn main() {}
 ```
 "##,
 
@@ -1141,7 +1256,7 @@ let map = HashMap::new();
 ```
 
 Please verify you didn't misspell the type/module's name or that you didn't
-forgot to import it:
+forget to import it:
 
 
 ```
@@ -1196,27 +1311,26 @@ fn foo() {
 "##,
 
 E0435: r##"
-A non-constant value was used to initialise a constant.
+A non-constant value was used in a constant expression.
 
 Erroneous code example:
 
 ```compile_fail,E0435
-let foo = 42u32;
-const FOO : u32 = foo; // error: attempt to use a non-constant value in a
-                       //        constant
+let foo = 42;
+let a: [u8; foo]; // error: attempt to use a non-constant value in a constant
 ```
 
 To fix this error, please replace the value with a constant. Example:
 
 ```
-const FOO : u32 = 42u32; // ok!
+let a: [u8; 42]; // ok!
 ```
 
 Or:
 
 ```
-const OTHER_FOO : u32 = 42u32;
-const FOO : u32 = OTHER_FOO; // ok!
+const FOO: usize = 42;
+let a: [u8; FOO]; // ok!
 ```
 "##,
 
@@ -1254,8 +1368,6 @@ match the name of any associated constant in the trait.
 Erroneous code example:
 
 ```compile_fail,E0438
-#![feature(associated_consts)]
-
 trait Foo {}
 
 impl Foo for i32 {
@@ -1269,6 +1381,115 @@ The solution to this problem is to remove the extraneous associated constant:
 trait Foo {}
 
 impl Foo for i32 {}
+```
+"##,
+
+E0466: r##"
+Macro import declarations were malformed.
+
+Erroneous code examples:
+
+```compile_fail,E0466
+#[macro_use(a_macro(another_macro))] // error: invalid import declaration
+extern crate core as some_crate;
+
+#[macro_use(i_want = "some_macros")] // error: invalid import declaration
+extern crate core as another_crate;
+```
+
+This is a syntax error at the level of attribute declarations. The proper
+syntax for macro imports is the following:
+
+```ignore (cannot-doctest-multicrate-project)
+// In some_crate:
+#[macro_export]
+macro_rules! get_tacos {
+    ...
+}
+
+#[macro_export]
+macro_rules! get_pimientos {
+    ...
+}
+
+// In your crate:
+#[macro_use(get_tacos, get_pimientos)] // It imports `get_tacos` and
+extern crate some_crate;               // `get_pimientos` macros from some_crate
+```
+
+If you would like to import all exported macros, write `macro_use` with no
+arguments.
+"##,
+
+E0468: r##"
+A non-root module attempts to import macros from another crate.
+
+Example of erroneous code:
+
+```compile_fail,E0468
+mod foo {
+    #[macro_use(debug_assert)]  // error: must be at crate root to import
+    extern crate core;          //        macros from another crate
+    fn run_macro() { debug_assert!(true); }
+}
+```
+
+Only `extern crate` imports at the crate root level are allowed to import
+macros.
+
+Either move the macro import to crate root or do without the foreign macros.
+This will work:
+
+```
+#[macro_use(debug_assert)]
+extern crate core;
+
+mod foo {
+    fn run_macro() { debug_assert!(true); }
+}
+# fn main() {}
+```
+"##,
+
+E0469: r##"
+A macro listed for import was not found.
+
+Erroneous code example:
+
+```compile_fail,E0469
+#[macro_use(drink, be_merry)] // error: imported macro not found
+extern crate alloc;
+
+fn main() {
+    // ...
+}
+```
+
+Either the listed macro is not contained in the imported crate, or it is not
+exported from the given crate.
+
+This could be caused by a typo. Did you misspell the macro's name?
+
+Double-check the names of the macros listed for import, and that the crate
+in question exports them.
+
+A working version would be:
+
+```ignore (cannot-doctest-multicrate-project)
+// In some_crate crate:
+#[macro_export]
+macro_rules! eat {
+    ...
+}
+
+#[macro_export]
+macro_rules! drink {
+    ...
+}
+
+// In your crate:
+#[macro_use(eat, drink)]
+extern crate some_crate; //ok!
 ```
 "##,
 
@@ -1307,6 +1528,129 @@ match r {
 ```
 "##,
 
+E0532: r##"
+Pattern arm did not match expected kind.
+
+Erroneous code example:
+
+```compile_fail,E0532
+enum State {
+    Succeeded,
+    Failed(String),
+}
+
+fn print_on_failure(state: &State) {
+    match *state {
+        // error: expected unit struct/variant or constant, found tuple
+        //        variant `State::Failed`
+        State::Failed => println!("Failed"),
+        _ => ()
+    }
+}
+```
+
+To fix this error, ensure the match arm kind is the same as the expression
+matched.
+
+Fixed example:
+
+```
+enum State {
+    Succeeded,
+    Failed(String),
+}
+
+fn print_on_failure(state: &State) {
+    match *state {
+        State::Failed(ref msg) => println!("Failed with {}", msg),
+        _ => ()
+    }
+}
+```
+"##,
+
+E0603: r##"
+A private item was used outside its scope.
+
+Erroneous code example:
+
+```compile_fail,E0603
+mod SomeModule {
+    const PRIVATE: u32 = 0x_a_bad_1dea_u32; // This const is private, so we
+                                            // can't use it outside of the
+                                            // `SomeModule` module.
+}
+
+println!("const value: {}", SomeModule::PRIVATE); // error: constant `PRIVATE`
+                                                  //        is private
+```
+
+In order to fix this error, you need to make the item public by using the `pub`
+keyword. Example:
+
+```
+mod SomeModule {
+    pub const PRIVATE: u32 = 0x_a_bad_1dea_u32; // We set it public by using the
+                                                // `pub` keyword.
+}
+
+println!("const value: {}", SomeModule::PRIVATE); // ok!
+```
+"##,
+
+E0659: r##"
+An item usage is ambiguous.
+
+Erroneous code example:
+
+```compile_fail,E0659
+pub mod moon {
+    pub fn foo() {}
+}
+
+pub mod earth {
+    pub fn foo() {}
+}
+
+mod collider {
+    pub use moon::*;
+    pub use earth::*;
+}
+
+fn main() {
+    collider::foo(); // ERROR: `foo` is ambiguous
+}
+```
+
+This error generally appears when two items with the same name are imported into
+a module. Here, the `foo` functions are imported and reexported from the
+`collider` module and therefore, when we're using `collider::foo()`, both
+functions collide.
+
+To solve this error, the best solution is generally to keep the path before the
+item when using it. Example:
+
+```
+pub mod moon {
+    pub fn foo() {}
+}
+
+pub mod earth {
+    pub fn foo() {}
+}
+
+mod collider {
+    pub use moon;
+    pub use earth;
+}
+
+fn main() {
+    collider::moon::foo(); // ok!
+    collider::earth::foo(); // ok!
+}
+```
+"##,
+
 }
 
 register_diagnostics! {
@@ -1314,7 +1658,7 @@ register_diagnostics! {
 //  E0157, unused error code
 //  E0257,
 //  E0258,
-    E0402, // cannot use an outer type parameter in this context
+//  E0402, // cannot use an outer type parameter in this context
 //  E0406, merged into 420
 //  E0410, merged into 408
 //  E0413, merged into 530
@@ -1325,6 +1669,13 @@ register_diagnostics! {
 //  E0420, merged into 532
 //  E0421, merged into 531
     E0531, // unresolved pattern path kind `name`
-    E0532, // expected pattern path kind, found another pattern path kind
 //  E0427, merged into 530
+//  E0467, removed
+//  E0470, removed
+    E0573,
+    E0574,
+    E0575,
+    E0576,
+    E0577,
+    E0578,
 }

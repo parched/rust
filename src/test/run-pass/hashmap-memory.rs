@@ -62,7 +62,6 @@ mod map_reduce {
         }
 
         let ctrl_clone = ctrl.clone();
-        // FIXME (#22405): Replace `Box::new` with `box` here when/if possible.
         ::map(input, Box::new(|a,b| emit(&mut intermediates, ctrl.clone(), a, b)));
         ctrl_clone.send(ctrl_proto::mapper_done).unwrap();
     }
@@ -99,5 +98,5 @@ mod map_reduce {
 
 pub fn main() {
     map_reduce::map_reduce(
-        vec!("../src/test/run-pass/hashmap-memory.rs".to_string()));
+        vec!["../src/test/run-pass/hashmap-memory.rs".to_string()]);
 }

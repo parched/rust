@@ -37,17 +37,96 @@
 //! Note that this module has a #[cfg(windows)] above it as none of this logic
 //! is required on Unix.
 
-extern crate kernel32;
-extern crate winapi;
+#![allow(bad_style, dead_code)]
 
 use std::env;
 use std::io;
 use std::mem;
+use Build;
 
-use self::winapi::*;
-use self::kernel32::*;
+type HANDLE = *mut u8;
+type BOOL = i32;
+type DWORD = u32;
+type LPHANDLE = *mut HANDLE;
+type LPVOID = *mut u8;
+type JOBOBJECTINFOCLASS = i32;
+type SIZE_T = usize;
+type LARGE_INTEGER = i64;
+type UINT = u32;
+type ULONG_PTR = usize;
+type ULONGLONG = u64;
 
-pub unsafe fn setup() {
+const FALSE: BOOL = 0;
+const DUPLICATE_SAME_ACCESS: DWORD = 0x2;
+const PROCESS_DUP_HANDLE: DWORD = 0x40;
+const JobObjectExtendedLimitInformation: JOBOBJECTINFOCLASS = 9;
+const JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE: DWORD = 0x2000;
+const JOB_OBJECT_LIMIT_PRIORITY_CLASS: DWORD = 0x00000020;
+const SEM_FAILCRITICALERRORS: UINT = 0x0001;
+const SEM_NOGPFAULTERRORBOX: UINT = 0x0002;
+const BELOW_NORMAL_PRIORITY_CLASS: DWORD = 0x00004000;
+
+extern "system" {
+    fn CreateJobObjectW(lpJobAttributes: *mut u8, lpName: *const u8) -> HANDLE;
+    fn CloseHandle(hObject: HANDLE) -> BOOL;
+    fn GetCurrentProcess() -> HANDLE;
+    fn OpenProcess(dwDesiredAccess: DWORD,
+                   bInheritHandle: BOOL,
+                   dwProcessId: DWORD) -> HANDLE;
+    fn DuplicateHandle(hSourceProcessHandle: HANDLE,
+                       hSourceHandle: HANDLE,
+                       hTargetProcessHandle: HANDLE,
+                       lpTargetHandle: LPHANDLE,
+                       dwDesiredAccess: DWORD,
+                       bInheritHandle: BOOL,
+                       dwOptions: DWORD) -> BOOL;
+    fn AssignProcessToJobObject(hJob: HANDLE, hProcess: HANDLE) -> BOOL;
+    fn SetInformationJobObject(hJob: HANDLE,
+                               JobObjectInformationClass: JOBOBJECTINFOCLASS,
+                               lpJobObjectInformation: LPVOID,
+                               cbJobObjectInformationLength: DWORD) -> BOOL;
+    fn SetErrorMode(mode: UINT) -> UINT;
+}
+
+#[repr(C)]
+struct JOBOBJECT_EXTENDED_LIMIT_INFORMATION {
+    BasicLimitInformation: JOBOBJECT_BASIC_LIMIT_INFORMATION,
+    IoInfo: IO_COUNTERS,
+    ProcessMemoryLimit: SIZE_T,
+    JobMemoryLimit: SIZE_T,
+    PeakProcessMemoryUsed: SIZE_T,
+    PeakJobMemoryUsed: SIZE_T,
+}
+
+#[repr(C)]
+struct IO_COUNTERS {
+    ReadOperationCount: ULONGLONG,
+    WriteOperationCount: ULONGLONG,
+    OtherOperationCount: ULONGLONG,
+    ReadTransferCount: ULONGLONG,
+    WriteTransferCount: ULONGLONG,
+    OtherTransferCount: ULONGLONG,
+}
+
+#[repr(C)]
+struct JOBOBJECT_BASIC_LIMIT_INFORMATION {
+    PerProcessUserTimeLimit: LARGE_INTEGER,
+    PerJobUserTimeLimit: LARGE_INTEGER,
+    LimitFlags: DWORD,
+    MinimumWorkingsetSize: SIZE_T,
+    MaximumWorkingsetSize: SIZE_T,
+    ActiveProcessLimit: DWORD,
+    Affinity: ULONG_PTR,
+    PriorityClass: DWORD,
+    SchedulingClass: DWORD,
+}
+
+pub unsafe fn setup(build: &mut Build) {
+    // Enable the Windows Error Reporting dialog which msys disables,
+    // so we can JIT debug rustc
+    let mode = SetErrorMode(0);
+    SetErrorMode(mode & !SEM_NOGPFAULTERRORBOX);
+
     // Create a new job object for us to use
     let job = CreateJobObjectW(0 as *mut _, 0 as *const _);
     assert!(job != 0 as *mut _, "{}", io::Error::last_os_error());
@@ -58,6 +137,10 @@ pub unsafe fn setup() {
     // children will reside in the job by default.
     let mut info = mem::zeroed::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>();
     info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    if build.config.low_priority {
+        info.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_PRIORITY_CLASS;
+        info.BasicLimitInformation.PriorityClass = BELOW_NORMAL_PRIORITY_CLASS;
+    }
     let r = SetInformationJobObject(job,
                                     JobObjectExtendedLimitInformation,
                                     &mut info as *mut _ as LPVOID,
@@ -100,7 +183,7 @@ pub unsafe fn setup() {
                             0, FALSE, DUPLICATE_SAME_ACCESS);
 
     // If this failed, well at least we tried! An example of DuplicateHandle
-    // failing in the past has been when the wrong python2 package spawed this
+    // failing in the past has been when the wrong python2 package spawned this
     // build system (e.g. the `python2` package in MSYS instead of
     // `mingw-w64-x86_64-python2`. Not sure why it failed, but the "failure
     // mode" here is that we only clean everything up when the build system

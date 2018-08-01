@@ -10,10 +10,10 @@ crate-type = ["dylib"]
 
 [dependencies]
 graphviz = { path = "../libgraphviz" }
-rbml = { path = "../librbml" }
+log = "0.4"
+rand = "0.4"
 rustc = { path = "../librustc" }
 rustc_data_structures = { path = "../librustc_data_structures" }
 serialize = { path = "../libserialize" }
-log = { path = "../liblog" }
 syntax = { path = "../libsyntax" }
 syntax_pos = { path = "../libsyntax_pos" }

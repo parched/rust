@@ -11,64 +11,64 @@
 // Type resolution: the phase that finds all the types in the AST with
 // unresolved type variables and replaces "ty_var" types with their
 // substitutions.
-use self::ResolveReason::*;
 
 use check::FnCtxt;
-use hir::def_id::DefId;
-use rustc::ty::{self, Ty, TyCtxt, MethodCall, MethodCallee};
-use rustc::ty::adjustment;
-use rustc::ty::fold::{TypeFolder,TypeFoldable};
-use rustc::infer::{InferCtxt, FixupError};
-use rustc::util::nodemap::DefIdMap;
-use write_substs_to_tcx;
-use write_ty_to_tcx;
-
-use std::cell::Cell;
-
+use rustc::hir;
+use rustc::hir::def_id::{DefId, DefIndex};
+use rustc::hir::intravisit::{self, NestedVisitorMap, Visitor};
+use rustc::infer::InferCtxt;
+use rustc::ty::subst::UnpackedKind;
+use rustc::ty::{self, Ty, TyCtxt};
+use rustc::ty::adjustment::{Adjust, Adjustment};
+use rustc::ty::fold::{TypeFoldable, TypeFolder, BottomUpFolder};
+use rustc::util::nodemap::DefIdSet;
 use syntax::ast;
-use syntax_pos::{DUMMY_SP, Span};
-
-use rustc::hir::print::pat_to_string;
-use rustc::hir::intravisit::{self, Visitor};
-use rustc::hir::{self, PatKind};
+use syntax_pos::Span;
+use std::mem;
+use rustc_data_structures::sync::Lrc;
 
 ///////////////////////////////////////////////////////////////////////////
-// Entry point functions
+// Entry point
 
 impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
-    pub fn resolve_type_vars_in_expr(&self, e: &hir::Expr, item_id: ast::NodeId) {
-        assert_eq!(self.writeback_errors.get(), false);
-        let mut wbcx = WritebackCx::new(self);
-        wbcx.visit_expr(e);
-        wbcx.visit_upvar_borrow_map();
-        wbcx.visit_closures();
-        wbcx.visit_liberated_fn_sigs();
-        wbcx.visit_fru_field_types();
-        wbcx.visit_deferred_obligations(item_id);
-    }
+    pub fn resolve_type_vars_in_body(&self, body: &'gcx hir::Body) -> &'gcx ty::TypeckTables<'gcx> {
+        let item_id = self.tcx.hir.body_owner(body.id());
+        let item_def_id = self.tcx.hir.local_def_id(item_id);
 
-    pub fn resolve_type_vars_in_fn(&self,
-                                   decl: &hir::FnDecl,
-                                   blk: &hir::Block,
-                                   item_id: ast::NodeId) {
-        assert_eq!(self.writeback_errors.get(), false);
-        let mut wbcx = WritebackCx::new(self);
-        wbcx.visit_block(blk);
-        for arg in &decl.inputs {
-            wbcx.visit_node_id(ResolvingPattern(arg.pat.span), arg.id);
-            wbcx.visit_pat(&arg.pat);
-
-            // Privacy needs the type for the whole pattern, not just each binding
-            if let PatKind::Binding(..) = arg.pat.node {} else {
-                wbcx.visit_node_id(ResolvingPattern(arg.pat.span), arg.pat.id);
-            }
+        let mut wbcx = WritebackCx::new(self, body);
+        for arg in &body.arguments {
+            wbcx.visit_node_id(arg.pat.span, arg.hir_id);
         }
+        wbcx.visit_body(body);
         wbcx.visit_upvar_borrow_map();
         wbcx.visit_closures();
         wbcx.visit_liberated_fn_sigs();
         wbcx.visit_fru_field_types();
-        wbcx.visit_anon_types(item_id);
-        wbcx.visit_deferred_obligations(item_id);
+        wbcx.visit_anon_types(body.value.span);
+        wbcx.visit_cast_types();
+        wbcx.visit_free_region_map();
+        wbcx.visit_user_provided_tys();
+
+        let used_trait_imports = mem::replace(
+            &mut self.tables.borrow_mut().used_trait_imports,
+            Lrc::new(DefIdSet()),
+        );
+        debug!(
+            "used_trait_imports({:?}) = {:?}",
+            item_def_id,
+            used_trait_imports
+        );
+        wbcx.tables.used_trait_imports = used_trait_imports;
+
+        wbcx.tables.tainted_by_errors = self.is_tainted_by_errors();
+
+        debug!(
+            "writeback: tables for {:?} are {:#?}",
+            item_def_id,
+            wbcx.tables
+        );
+
+        self.tcx.alloc_tables(wbcx.tables)
     }
 }
 
@@ -80,97 +80,134 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
 // there, it applies a few ad-hoc checks that were not convenient to
 // do elsewhere.
 
-struct WritebackCx<'cx, 'gcx: 'cx+'tcx, 'tcx: 'cx> {
+struct WritebackCx<'cx, 'gcx: 'cx + 'tcx, 'tcx: 'cx> {
     fcx: &'cx FnCtxt<'cx, 'gcx, 'tcx>,
 
-    // Mapping from free regions of the function to the
-    // early-bound versions of them, visible from the
-    // outside of the function. This is needed by, and
-    // only populated if there are any `impl Trait`.
-    free_to_bound_regions: DefIdMap<&'gcx ty::Region>
+    tables: ty::TypeckTables<'gcx>,
+
+    body: &'gcx hir::Body,
 }
 
 impl<'cx, 'gcx, 'tcx> WritebackCx<'cx, 'gcx, 'tcx> {
-    fn new(fcx: &'cx FnCtxt<'cx, 'gcx, 'tcx>) -> WritebackCx<'cx, 'gcx, 'tcx> {
-        let mut wbcx = WritebackCx {
-            fcx: fcx,
-            free_to_bound_regions: DefIdMap()
-        };
+    fn new(
+        fcx: &'cx FnCtxt<'cx, 'gcx, 'tcx>,
+        body: &'gcx hir::Body,
+    ) -> WritebackCx<'cx, 'gcx, 'tcx> {
+        let owner = fcx.tcx.hir.definitions().node_to_hir_id(body.id().node_id);
 
-        // Only build the reverse mapping if `impl Trait` is used.
-        if fcx.anon_types.borrow().is_empty() {
-            return wbcx;
+        WritebackCx {
+            fcx,
+            tables: ty::TypeckTables::empty(Some(DefId::local(owner.owner))),
+            body,
         }
-
-        let gcx = fcx.tcx.global_tcx();
-        let free_substs = fcx.parameter_environment.free_substs;
-        for (i, k) in free_substs.params().iter().enumerate() {
-            let r = if let Some(r) = k.as_region() {
-                r
-            } else {
-                continue;
-            };
-            match *r {
-                ty::ReFree(ty::FreeRegion {
-                    bound_region: ty::BoundRegion::BrNamed(def_id, name, _), ..
-                }) => {
-                    let bound_region = gcx.mk_region(ty::ReEarlyBound(ty::EarlyBoundRegion {
-                        index: i as u32,
-                        name: name,
-                    }));
-                    wbcx.free_to_bound_regions.insert(def_id, bound_region);
-                }
-                _ => {
-                    bug!("{:?} is not a free region for an early-bound lifetime", r);
-                }
-            }
-        }
-
-        wbcx
     }
 
     fn tcx(&self) -> TyCtxt<'cx, 'gcx, 'tcx> {
         self.fcx.tcx
     }
 
+    fn write_ty_to_tables(&mut self, hir_id: hir::HirId, ty: Ty<'gcx>) {
+        debug!("write_ty_to_tables({:?}, {:?})", hir_id, ty);
+        assert!(!ty.needs_infer() && !ty.has_skol());
+        self.tables.node_types_mut().insert(hir_id, ty);
+    }
+
     // Hacky hack: During type-checking, we treat *all* operators
     // as potentially overloaded. But then, during writeback, if
     // we observe that something like `a+b` is (known to be)
     // operating on scalars, we clear the overload.
-    fn fix_scalar_binary_expr(&mut self, e: &hir::Expr) {
+    fn fix_scalar_builtin_expr(&mut self, e: &hir::Expr) {
         match e.node {
-            hir::ExprBinary(ref op, ref lhs, ref rhs) |
-            hir::ExprAssignOp(ref op, ref lhs, ref rhs) => {
-                let lhs_ty = self.fcx.node_ty(lhs.id);
+            hir::ExprKind::Unary(hir::UnNeg, ref inner) |
+            hir::ExprKind::Unary(hir::UnNot, ref inner) => {
+                let inner_ty = self.fcx.node_ty(inner.hir_id);
+                let inner_ty = self.fcx.resolve_type_vars_if_possible(&inner_ty);
+
+                if inner_ty.is_scalar() {
+                    let mut tables = self.fcx.tables.borrow_mut();
+                    tables.type_dependent_defs_mut().remove(e.hir_id);
+                    tables.node_substs_mut().remove(e.hir_id);
+                }
+            }
+            hir::ExprKind::Binary(ref op, ref lhs, ref rhs)
+            | hir::ExprKind::AssignOp(ref op, ref lhs, ref rhs) => {
+                let lhs_ty = self.fcx.node_ty(lhs.hir_id);
                 let lhs_ty = self.fcx.resolve_type_vars_if_possible(&lhs_ty);
 
-                let rhs_ty = self.fcx.node_ty(rhs.id);
+                let rhs_ty = self.fcx.node_ty(rhs.hir_id);
                 let rhs_ty = self.fcx.resolve_type_vars_if_possible(&rhs_ty);
 
                 if lhs_ty.is_scalar() && rhs_ty.is_scalar() {
-                    self.fcx.tables.borrow_mut().method_map.remove(&MethodCall::expr(e.id));
+                    let mut tables = self.fcx.tables.borrow_mut();
+                    tables.type_dependent_defs_mut().remove(e.hir_id);
+                    tables.node_substs_mut().remove(e.hir_id);
 
-                    // weird but true: the by-ref binops put an
-                    // adjustment on the lhs but not the rhs; the
-                    // adjustment for rhs is kind of baked into the
-                    // system.
                     match e.node {
-                        hir::ExprBinary(..) => {
+                        hir::ExprKind::Binary(..) => {
                             if !op.node.is_by_value() {
-                                self.fcx.tables.borrow_mut().adjustments.remove(&lhs.id);
+                                let mut adjustments = tables.adjustments_mut();
+                                adjustments.get_mut(lhs.hir_id).map(|a| a.pop());
+                                adjustments.get_mut(rhs.hir_id).map(|a| a.pop());
                             }
-                        },
-                        hir::ExprAssignOp(..) => {
-                            self.fcx.tables.borrow_mut().adjustments.remove(&lhs.id);
-                        },
-                        _ => {},
+                        }
+                        hir::ExprKind::AssignOp(..) => {
+                            tables
+                                .adjustments_mut()
+                                .get_mut(lhs.hir_id)
+                                .map(|a| a.pop());
+                        }
+                        _ => {}
                     }
                 }
             }
-            _ => {},
+            _ => {}
+        }
+    }
+
+    // Similar to operators, indexing is always assumed to be overloaded
+    // Here, correct cases where an indexing expression can be simplified
+    // to use builtin indexing because the index type is known to be
+    // usize-ish
+    fn fix_index_builtin_expr(&mut self, e: &hir::Expr) {
+        if let hir::ExprKind::Index(ref base, ref index) = e.node {
+            let mut tables = self.fcx.tables.borrow_mut();
+
+            match tables.expr_ty_adjusted(&base).sty {
+                // All valid indexing looks like this
+                ty::TyRef(_, base_ty, _) => {
+                    let index_ty = tables.expr_ty_adjusted(&index);
+                    let index_ty = self.fcx.resolve_type_vars_if_possible(&index_ty);
+
+                    if base_ty.builtin_index().is_some()
+                        && index_ty == self.fcx.tcx.types.usize {
+                        // Remove the method call record
+                        tables.type_dependent_defs_mut().remove(e.hir_id);
+                        tables.node_substs_mut().remove(e.hir_id);
+
+                        tables.adjustments_mut().get_mut(base.hir_id).map(|a| {
+                            // Discard the need for a mutable borrow
+                            match a.pop() {
+                                // Extra adjustment made when indexing causes a drop
+                                // of size information - we need to get rid of it
+                                // Since this is "after" the other adjustment to be
+                                // discarded, we do an extra `pop()`
+                                Some(Adjustment { kind: Adjust::Unsize, .. }) => {
+                                    // So the borrow discard actually happens here
+                                    a.pop();
+                                },
+                                _ => {}
+                            }
+                        });
+                    }
+                },
+                // Might encounter non-valid indexes at this point, so there
+                // has to be a fall-through
+                _ => {},
+            }
         }
     }
 }
+
 
 ///////////////////////////////////////////////////////////////////////////
 // Impl of Visitor for Resolver
@@ -180,347 +217,459 @@ impl<'cx, 'gcx, 'tcx> WritebackCx<'cx, 'gcx, 'tcx> {
 // below. In general, a function is made into a `visitor` if it must
 // traffic in node-ids or update tables in the type context etc.
 
-impl<'cx, 'gcx, 'tcx, 'v> Visitor<'v> for WritebackCx<'cx, 'gcx, 'tcx> {
-    fn visit_stmt(&mut self, s: &hir::Stmt) {
-        if self.fcx.writeback_errors.get() {
-            return;
-        }
-
-        self.visit_node_id(ResolvingExpr(s.span), s.node.id());
-        intravisit::walk_stmt(self, s);
+impl<'cx, 'gcx, 'tcx> Visitor<'gcx> for WritebackCx<'cx, 'gcx, 'tcx> {
+    fn nested_visit_map<'this>(&'this mut self) -> NestedVisitorMap<'this, 'gcx> {
+        NestedVisitorMap::None
     }
 
-    fn visit_expr(&mut self, e: &hir::Expr) {
-        if self.fcx.writeback_errors.get() {
-            return;
-        }
+    fn visit_expr(&mut self, e: &'gcx hir::Expr) {
+        self.fix_scalar_builtin_expr(e);
+        self.fix_index_builtin_expr(e);
 
-        self.fix_scalar_binary_expr(e);
+        self.visit_node_id(e.span, e.hir_id);
 
-        self.visit_node_id(ResolvingExpr(e.span), e.id);
-        self.visit_method_map_entry(ResolvingExpr(e.span),
-                                    MethodCall::expr(e.id));
+        match e.node {
+            hir::ExprKind::Closure(_, _, body, _, _) => {
+                let body = self.fcx.tcx.hir.body(body);
+                for arg in &body.arguments {
+                    self.visit_node_id(e.span, arg.hir_id);
+                }
 
-        if let hir::ExprClosure(_, ref decl, _, _) = e.node {
-            for input in &decl.inputs {
-                self.visit_node_id(ResolvingExpr(e.span), input.id);
+                self.visit_body(body);
             }
+            hir::ExprKind::Struct(_, ref fields, _) => {
+                for field in fields {
+                    self.visit_field_id(field.id);
+                }
+            }
+            hir::ExprKind::Field(..) => {
+                self.visit_field_id(e.id);
+            }
+            _ => {}
         }
 
         intravisit::walk_expr(self, e);
     }
 
-    fn visit_block(&mut self, b: &hir::Block) {
-        if self.fcx.writeback_errors.get() {
-            return;
-        }
-
-        self.visit_node_id(ResolvingExpr(b.span), b.id);
+    fn visit_block(&mut self, b: &'gcx hir::Block) {
+        self.visit_node_id(b.span, b.hir_id);
         intravisit::walk_block(self, b);
     }
 
-    fn visit_pat(&mut self, p: &hir::Pat) {
-        if self.fcx.writeback_errors.get() {
-            return;
-        }
+    fn visit_pat(&mut self, p: &'gcx hir::Pat) {
+        match p.node {
+            hir::PatKind::Binding(..) => {
+                if let Some(&bm) = self.fcx.tables.borrow().pat_binding_modes().get(p.hir_id) {
+                    self.tables.pat_binding_modes_mut().insert(p.hir_id, bm);
+                } else {
+                    self.tcx().sess.delay_span_bug(p.span, "missing binding mode");
+                }
+            }
+            hir::PatKind::Struct(_, ref fields, _) => {
+                for field in fields {
+                    self.visit_field_id(field.node.id);
+                }
+            }
+            _ => {}
+        };
 
-        self.visit_node_id(ResolvingPattern(p.span), p.id);
+        self.visit_pat_adjustments(p.span, p.hir_id);
 
-        debug!("Type for pattern binding {} (id {}) resolved to {:?}",
-               pat_to_string(p),
-               p.id,
-               self.tcx().node_id_to_type(p.id));
-
+        self.visit_node_id(p.span, p.hir_id);
         intravisit::walk_pat(self, p);
     }
 
-    fn visit_local(&mut self, l: &hir::Local) {
-        if self.fcx.writeback_errors.get() {
-            return;
-        }
-
-        let var_ty = self.fcx.local_ty(l.span, l.id);
-        let var_ty = self.resolve(&var_ty, ResolvingLocal(l.span));
-        write_ty_to_tcx(self.fcx.ccx, l.id, var_ty);
+    fn visit_local(&mut self, l: &'gcx hir::Local) {
         intravisit::walk_local(self, l);
+        let var_ty = self.fcx.local_ty(l.span, l.id);
+        let var_ty = self.resolve(&var_ty, &l.span);
+        self.write_ty_to_tables(l.hir_id, var_ty);
     }
 
-    fn visit_ty(&mut self, t: &hir::Ty) {
-        match t.node {
-            hir::TyFixedLengthVec(ref ty, ref count_expr) => {
-                self.visit_ty(&ty);
-                write_ty_to_tcx(self.fcx.ccx, count_expr.id, self.tcx().types.usize);
-            }
-            hir::TyBareFn(ref function_declaration) => {
-                intravisit::walk_fn_decl_nopat(self, &function_declaration.decl);
-                walk_list!(self, visit_lifetime_def, &function_declaration.lifetimes);
-            }
-            _ => intravisit::walk_ty(self, t)
-        }
+    fn visit_ty(&mut self, hir_ty: &'gcx hir::Ty) {
+        intravisit::walk_ty(self, hir_ty);
+        let ty = self.fcx.node_ty(hir_ty.hir_id);
+        let ty = self.resolve(&ty, &hir_ty.span);
+        self.write_ty_to_tables(hir_ty.hir_id, ty);
     }
 }
 
 impl<'cx, 'gcx, 'tcx> WritebackCx<'cx, 'gcx, 'tcx> {
-    fn visit_upvar_borrow_map(&self) {
-        if self.fcx.writeback_errors.get() {
-            return;
-        }
-
+    fn visit_upvar_borrow_map(&mut self) {
         for (upvar_id, upvar_capture) in self.fcx.tables.borrow().upvar_capture_map.iter() {
             let new_upvar_capture = match *upvar_capture {
                 ty::UpvarCapture::ByValue => ty::UpvarCapture::ByValue,
                 ty::UpvarCapture::ByRef(ref upvar_borrow) => {
                     let r = upvar_borrow.region;
-                    let r = self.resolve(&r, ResolvingUpvar(*upvar_id));
-                    ty::UpvarCapture::ByRef(
-                        ty::UpvarBorrow { kind: upvar_borrow.kind, region: r })
+                    let r = self.resolve(&r, &upvar_id.var_id);
+                    ty::UpvarCapture::ByRef(ty::UpvarBorrow {
+                        kind: upvar_borrow.kind,
+                        region: r,
+                    })
                 }
             };
-            debug!("Upvar capture for {:?} resolved to {:?}",
-                   upvar_id,
-                   new_upvar_capture);
-            self.tcx()
-                .tables
-                .borrow_mut()
+            debug!(
+                "Upvar capture for {:?} resolved to {:?}",
+                upvar_id,
+                new_upvar_capture
+            );
+            self.tables
                 .upvar_capture_map
                 .insert(*upvar_id, new_upvar_capture);
         }
     }
 
-    fn visit_closures(&self) {
-        if self.fcx.writeback_errors.get() {
-            return
-        }
+    fn visit_closures(&mut self) {
+        let fcx_tables = self.fcx.tables.borrow();
+        debug_assert_eq!(fcx_tables.local_id_root, self.tables.local_id_root);
+        let common_local_id_root = fcx_tables.local_id_root.unwrap();
 
-        for (def_id, closure_ty) in self.fcx.tables.borrow().closure_tys.iter() {
-            let closure_ty = self.resolve(closure_ty, ResolvingClosure(*def_id));
-            self.tcx().tables.borrow_mut().closure_tys.insert(*def_id, closure_ty);
-        }
-
-        for (def_id, &closure_kind) in self.fcx.tables.borrow().closure_kinds.iter() {
-            self.tcx().tables.borrow_mut().closure_kinds.insert(*def_id, closure_kind);
+        for (&id, &origin) in fcx_tables.closure_kind_origins().iter() {
+            let hir_id = hir::HirId {
+                owner: common_local_id_root.index,
+                local_id: id,
+            };
+            self.tables
+                .closure_kind_origins_mut()
+                .insert(hir_id, origin);
         }
     }
 
-    fn visit_anon_types(&self, item_id: ast::NodeId) {
-        if self.fcx.writeback_errors.get() {
-            return
+    fn visit_cast_types(&mut self) {
+        let fcx_tables = self.fcx.tables.borrow();
+        let fcx_cast_kinds = fcx_tables.cast_kinds();
+        debug_assert_eq!(fcx_tables.local_id_root, self.tables.local_id_root);
+        let mut self_cast_kinds = self.tables.cast_kinds_mut();
+        let common_local_id_root = fcx_tables.local_id_root.unwrap();
+
+        for (&local_id, &cast_kind) in fcx_cast_kinds.iter() {
+            let hir_id = hir::HirId {
+                owner: common_local_id_root.index,
+                local_id,
+            };
+            self_cast_kinds.insert(hir_id, cast_kind);
         }
+    }
 
-        let item_def_id = self.fcx.tcx.map.local_def_id(item_id);
+    fn visit_free_region_map(&mut self) {
+        let free_region_map = self.tcx()
+            .lift_to_global(&self.fcx.tables.borrow().free_region_map);
+        let free_region_map = free_region_map.expect("all regions in free-region-map are global");
+        self.tables.free_region_map = free_region_map;
+    }
 
-        let gcx = self.tcx().global_tcx();
-        for (&def_id, &concrete_ty) in self.fcx.anon_types.borrow().iter() {
-            let reason = ResolvingAnonTy(def_id);
-            let inside_ty = self.resolve(&concrete_ty, reason);
+    fn visit_user_provided_tys(&mut self) {
+        let fcx_tables = self.fcx.tables.borrow();
+        debug_assert_eq!(fcx_tables.local_id_root, self.tables.local_id_root);
+        let common_local_id_root = fcx_tables.local_id_root.unwrap();
 
-            // Convert the type from the function into a type valid outside
-            // the function, by replacing free regions with early-bound ones.
-            let outside_ty = gcx.fold_regions(&inside_ty, &mut false, |r, _| {
-                match *r {
-                    // 'static is valid everywhere.
-                    ty::ReStatic => gcx.mk_region(ty::ReStatic),
+        for (&local_id, c_ty) in fcx_tables.user_provided_tys().iter() {
+            let hir_id = hir::HirId {
+                owner: common_local_id_root.index,
+                local_id,
+            };
 
-                    // Free regions that come from early-bound regions are valid.
-                    ty::ReFree(ty::FreeRegion {
-                        bound_region: ty::BoundRegion::BrNamed(def_id, _, _), ..
-                    }) if self.free_to_bound_regions.contains_key(&def_id) => {
-                        self.free_to_bound_regions[&def_id]
+            let c_ty = if let Some(c_ty) = self.tcx().lift_to_global(c_ty) {
+                c_ty
+            } else {
+                span_bug!(
+                    hir_id.to_span(&self.fcx.tcx),
+                    "writeback: `{:?}` missing from the global type context",
+                    c_ty
+                );
+            };
+
+            self.tables
+                .user_provided_tys_mut()
+                .insert(hir_id, c_ty.clone());
+        }
+    }
+
+    fn visit_anon_types(&mut self, span: Span) {
+        for (&def_id, anon_defn) in self.fcx.anon_types.borrow().iter() {
+            let node_id = self.tcx().hir.as_local_node_id(def_id).unwrap();
+            let instantiated_ty = self.resolve(&anon_defn.concrete_ty, &node_id);
+
+            let generics = self.tcx().generics_of(def_id);
+
+            let definition_ty = if generics.parent.is_some() {
+                // impl trait
+                self.fcx.infer_anon_definition_from_instantiation(
+                    def_id,
+                    anon_defn,
+                    instantiated_ty,
+                )
+            } else {
+                // prevent
+                // * `fn foo<T>() -> Foo<T>`
+                // * `fn foo<T: Bound + Other>() -> Foo<T>`
+                // from being defining
+
+                // Also replace all generic params with the ones from the existential type
+                // definition so
+                // ```rust
+                // existential type Foo<T>: 'static;
+                // fn foo<U>() -> Foo<U> { .. }
+                // ```
+                // figures out the concrete type with `U`, but the stored type is with `T`
+                instantiated_ty.fold_with(&mut BottomUpFolder {
+                    tcx: self.tcx().global_tcx(),
+                    fldop: |ty| {
+                        trace!("checking type {:?}: {:#?}", ty, ty.sty);
+                        // find a type parameter
+                        if let ty::TyParam(..) = ty.sty {
+                            // look it up in the substitution list
+                            assert_eq!(anon_defn.substs.len(), generics.params.len());
+                            for (subst, param) in anon_defn.substs.iter().zip(&generics.params) {
+                                if let UnpackedKind::Type(subst) = subst.unpack() {
+                                    if subst == ty {
+                                        // found it in the substitution list, replace with the
+                                        // parameter from the existential type
+                                        return self
+                                            .tcx()
+                                            .global_tcx()
+                                            .mk_ty_param(param.index, param.name);
+                                    }
+                                }
+                            }
+                            self.tcx()
+                                .sess
+                                .struct_span_err(
+                                    span,
+                                    &format!(
+                                        "type parameter `{}` is part of concrete type but not used \
+                                        in parameter list for existential type",
+                                        ty,
+                                    ),
+                                )
+                                .emit();
+                            return self.tcx().types.err;
+                        }
+                        ty
+                    },
+                    reg_op: |region| {
+                        match region {
+                            // ignore static regions
+                            ty::ReStatic => region,
+                            _ => {
+                                trace!("checking {:?}", region);
+                                for (subst, p) in anon_defn.substs.iter().zip(&generics.params) {
+                                    if let UnpackedKind::Lifetime(subst) = subst.unpack() {
+                                        if subst == region {
+                                            // found it in the substitution list, replace with the
+                                            // parameter from the existential type
+                                            let reg = ty::EarlyBoundRegion {
+                                                def_id: p.def_id,
+                                                index: p.index,
+                                                name: p.name,
+                                            };
+                                            trace!("replace {:?} with {:?}", region, reg);
+                                            return self.tcx().global_tcx()
+                                                .mk_region(ty::ReEarlyBound(reg));
+                                        }
+                                    }
+                                }
+                                trace!("anon_defn: {:#?}", anon_defn);
+                                trace!("generics: {:#?}", generics);
+                                self.tcx().sess
+                                    .struct_span_err(
+                                        span,
+                                        "non-defining existential type use in defining scope",
+                                    )
+                                    .span_label(
+                                        span,
+                                        format!(
+                                            "lifetime `{}` is part of concrete type but not used \
+                                            in parameter list of existential type",
+                                            region,
+                                        ),
+                                    )
+                                    .emit();
+                                self.tcx().global_tcx().mk_region(ty::ReStatic)
+                            }
+                        }
                     }
+                })
+            };
 
-                    ty::ReFree(_) |
-                    ty::ReEarlyBound(_) |
-                    ty::ReLateBound(..) |
-                    ty::ReScope(_) |
-                    ty::ReSkolemized(..) => {
-                        let span = reason.span(self.tcx());
-                        span_err!(self.tcx().sess, span, E0564,
-                                  "only named lifetimes are allowed in `impl Trait`, \
-                                   but `{}` was found in the type `{}`", r, inside_ty);
-                        gcx.mk_region(ty::ReStatic)
-                    }
-
-                    ty::ReVar(_) |
-                    ty::ReEmpty |
-                    ty::ReErased => {
-                        let span = reason.span(self.tcx());
-                        span_bug!(span, "invalid region in impl Trait: {:?}", r);
-                    }
+            let old = self.tables.concrete_existential_types.insert(def_id, definition_ty);
+            if let Some(old) = old {
+                if old != definition_ty {
+                    span_bug!(
+                        span,
+                        "visit_anon_types tried to write \
+                        different types for the same existential type: {:?}, {:?}, {:?}",
+                        def_id,
+                        definition_ty,
+                        old,
+                    );
                 }
-            });
-
-            gcx.register_item_type(def_id, ty::TypeScheme {
-                ty: outside_ty,
-                generics: gcx.lookup_generics(item_def_id)
-            });
+            }
         }
     }
 
-    fn visit_node_id(&self, reason: ResolveReason, id: ast::NodeId) {
-        // Resolve any borrowings for the node with id `id`
-        self.visit_adjustments(reason, id);
+    fn visit_field_id(&mut self, node_id: ast::NodeId) {
+        let hir_id = self.tcx().hir.node_to_hir_id(node_id);
+        if let Some(index) = self.fcx.tables.borrow_mut().field_indices_mut().remove(hir_id) {
+            self.tables.field_indices_mut().insert(hir_id, index);
+        }
+    }
 
-        // Resolve the type of the node with id `id`
-        let n_ty = self.fcx.node_ty(id);
-        let n_ty = self.resolve(&n_ty, reason);
-        write_ty_to_tcx(self.fcx.ccx, id, n_ty);
-        debug!("Node {} has type {:?}", id, n_ty);
+    fn visit_node_id(&mut self, span: Span, hir_id: hir::HirId) {
+        // Export associated path extensions and method resultions.
+        if let Some(def) = self.fcx
+            .tables
+            .borrow_mut()
+            .type_dependent_defs_mut()
+            .remove(hir_id)
+        {
+            self.tables.type_dependent_defs_mut().insert(hir_id, def);
+        }
+
+        // Resolve any borrowings for the node with id `node_id`
+        self.visit_adjustments(span, hir_id);
+
+        // Resolve the type of the node with id `node_id`
+        let n_ty = self.fcx.node_ty(hir_id);
+        let n_ty = self.resolve(&n_ty, &span);
+        self.write_ty_to_tables(hir_id, n_ty);
+        debug!("Node {:?} has type {:?}", hir_id, n_ty);
 
         // Resolve any substitutions
-        self.fcx.opt_node_ty_substs(id, |item_substs| {
-            write_substs_to_tcx(self.fcx.ccx, id,
-                                self.resolve(item_substs, reason));
-        });
+        if let Some(substs) = self.fcx.tables.borrow().node_substs_opt(hir_id) {
+            let substs = self.resolve(&substs, &span);
+            debug!("write_substs_to_tcx({:?}, {:?})", hir_id, substs);
+            assert!(!substs.needs_infer() && !substs.has_skol());
+            self.tables.node_substs_mut().insert(hir_id, substs);
+        }
     }
 
-    fn visit_adjustments(&self, reason: ResolveReason, id: ast::NodeId) {
-        let adjustments = self.fcx.tables.borrow_mut().adjustments.remove(&id);
-        match adjustments {
+    fn visit_adjustments(&mut self, span: Span, hir_id: hir::HirId) {
+        let adjustment = self.fcx
+            .tables
+            .borrow_mut()
+            .adjustments_mut()
+            .remove(hir_id);
+        match adjustment {
             None => {
-                debug!("No adjustments for node {}", id);
+                debug!("No adjustments for node {:?}", hir_id);
             }
 
             Some(adjustment) => {
-                let resolved_adjustment = match adjustment {
-                    adjustment::AdjustNeverToAny(ty) => {
-                        adjustment::AdjustNeverToAny(self.resolve(&ty, reason))
-                    }
-
-                    adjustment::AdjustReifyFnPointer => {
-                        adjustment::AdjustReifyFnPointer
-                    }
-
-                    adjustment::AdjustMutToConstPointer => {
-                        adjustment::AdjustMutToConstPointer
-                    }
-
-                    adjustment::AdjustUnsafeFnPointer => {
-                        adjustment::AdjustUnsafeFnPointer
-                    }
-
-                    adjustment::AdjustDerefRef(adj) => {
-                        for autoderef in 0..adj.autoderefs {
-                            let method_call = MethodCall::autoderef(id, autoderef as u32);
-                            self.visit_method_map_entry(reason, method_call);
-                        }
-
-                        adjustment::AdjustDerefRef(adjustment::AutoDerefRef {
-                            autoderefs: adj.autoderefs,
-                            autoref: self.resolve(&adj.autoref, reason),
-                            unsize: self.resolve(&adj.unsize, reason),
-                        })
-                    }
-                };
-                debug!("Adjustments for node {}: {:?}", id, resolved_adjustment);
-                self.tcx().tables.borrow_mut().adjustments.insert(
-                    id, resolved_adjustment);
+                let resolved_adjustment = self.resolve(&adjustment, &span);
+                debug!(
+                    "Adjustments for node {:?}: {:?}",
+                    hir_id,
+                    resolved_adjustment
+                );
+                self.tables
+                    .adjustments_mut()
+                    .insert(hir_id, resolved_adjustment);
             }
         }
     }
 
-    fn visit_method_map_entry(&self,
-                              reason: ResolveReason,
-                              method_call: MethodCall) {
-        // Resolve any method map entry
-        let new_method = match self.fcx.tables.borrow_mut().method_map.remove(&method_call) {
-            Some(method) => {
-                debug!("writeback::resolve_method_map_entry(call={:?}, entry={:?})",
-                       method_call,
-                       method);
-                let new_method = MethodCallee {
-                    def_id: method.def_id,
-                    ty: self.resolve(&method.ty, reason),
-                    substs: self.resolve(&method.substs, reason),
-                };
-
-                Some(new_method)
+    fn visit_pat_adjustments(&mut self, span: Span, hir_id: hir::HirId) {
+        let adjustment = self.fcx
+            .tables
+            .borrow_mut()
+            .pat_adjustments_mut()
+            .remove(hir_id);
+        match adjustment {
+            None => {
+                debug!("No pat_adjustments for node {:?}", hir_id);
             }
-            None => None
-        };
 
-        //NB(jroesch): We need to match twice to avoid a double borrow which would cause an ICE
-        if let Some(method) = new_method {
-            self.tcx().tables.borrow_mut().method_map.insert(method_call, method);
+            Some(adjustment) => {
+                let resolved_adjustment = self.resolve(&adjustment, &span);
+                debug!(
+                    "pat_adjustments for node {:?}: {:?}",
+                    hir_id,
+                    resolved_adjustment
+                );
+                self.tables
+                    .pat_adjustments_mut()
+                    .insert(hir_id, resolved_adjustment);
+            }
         }
     }
 
-    fn visit_liberated_fn_sigs(&self) {
-        for (&node_id, fn_sig) in self.fcx.tables.borrow().liberated_fn_sigs.iter() {
-            let fn_sig = self.resolve(fn_sig, ResolvingFnSig(node_id));
-            self.tcx().tables.borrow_mut().liberated_fn_sigs.insert(node_id, fn_sig.clone());
+    fn visit_liberated_fn_sigs(&mut self) {
+        let fcx_tables = self.fcx.tables.borrow();
+        debug_assert_eq!(fcx_tables.local_id_root, self.tables.local_id_root);
+        let common_local_id_root = fcx_tables.local_id_root.unwrap();
+
+        for (&local_id, fn_sig) in fcx_tables.liberated_fn_sigs().iter() {
+            let hir_id = hir::HirId {
+                owner: common_local_id_root.index,
+                local_id,
+            };
+            let fn_sig = self.resolve(fn_sig, &hir_id);
+            self.tables
+                .liberated_fn_sigs_mut()
+                .insert(hir_id, fn_sig.clone());
         }
     }
 
-    fn visit_fru_field_types(&self) {
-        for (&node_id, ftys) in self.fcx.tables.borrow().fru_field_types.iter() {
-            let ftys = self.resolve(ftys, ResolvingFieldTypes(node_id));
-            self.tcx().tables.borrow_mut().fru_field_types.insert(node_id, ftys);
+    fn visit_fru_field_types(&mut self) {
+        let fcx_tables = self.fcx.tables.borrow();
+        debug_assert_eq!(fcx_tables.local_id_root, self.tables.local_id_root);
+        let common_local_id_root = fcx_tables.local_id_root.unwrap();
+
+        for (&local_id, ftys) in fcx_tables.fru_field_types().iter() {
+            let hir_id = hir::HirId {
+                owner: common_local_id_root.index,
+                local_id,
+            };
+            let ftys = self.resolve(ftys, &hir_id);
+            self.tables.fru_field_types_mut().insert(hir_id, ftys);
         }
     }
 
-    fn visit_deferred_obligations(&self, item_id: ast::NodeId) {
-        let deferred_obligations = self.fcx.deferred_obligations.borrow();
-        let obligations: Vec<_> = deferred_obligations.iter().map(|obligation| {
-            let reason = ResolvingDeferredObligation(obligation.cause.span);
-            self.resolve(obligation, reason)
-        }).collect();
-
-        if !obligations.is_empty() {
-            assert!(self.fcx.ccx.deferred_obligations.borrow_mut()
-                                .insert(item_id, obligations).is_none());
-        }
-    }
-
-    fn resolve<T>(&self, x: &T, reason: ResolveReason) -> T::Lifted
-        where T: TypeFoldable<'tcx> + ty::Lift<'gcx>
+    fn resolve<T>(&self, x: &T, span: &dyn Locatable) -> T::Lifted
+    where
+        T: TypeFoldable<'tcx> + ty::Lift<'gcx>,
     {
-        let x = x.fold_with(&mut Resolver::new(self.fcx, reason));
+        let x = x.fold_with(&mut Resolver::new(self.fcx, span, self.body));
         if let Some(lifted) = self.tcx().lift_to_global(&x) {
             lifted
         } else {
-            span_bug!(reason.span(self.tcx()),
-                      "writeback: `{:?}` missing from the global type context", x);
+            span_bug!(
+                span.to_span(&self.fcx.tcx),
+                "writeback: `{:?}` missing from the global type context",
+                x
+            );
         }
     }
 }
 
-///////////////////////////////////////////////////////////////////////////
-// Resolution reason.
-
-#[derive(Copy, Clone, Debug)]
-enum ResolveReason {
-    ResolvingExpr(Span),
-    ResolvingLocal(Span),
-    ResolvingPattern(Span),
-    ResolvingUpvar(ty::UpvarId),
-    ResolvingClosure(DefId),
-    ResolvingFnSig(ast::NodeId),
-    ResolvingFieldTypes(ast::NodeId),
-    ResolvingAnonTy(DefId),
-    ResolvingDeferredObligation(Span),
+trait Locatable {
+    fn to_span(&self, tcx: &TyCtxt) -> Span;
 }
 
-impl<'a, 'gcx, 'tcx> ResolveReason {
-    fn span(&self, tcx: TyCtxt<'a, 'gcx, 'tcx>) -> Span {
-        match *self {
-            ResolvingExpr(s) => s,
-            ResolvingLocal(s) => s,
-            ResolvingPattern(s) => s,
-            ResolvingUpvar(upvar_id) => {
-                tcx.expr_span(upvar_id.closure_expr_id)
-            }
-            ResolvingFnSig(id) => {
-                tcx.map.span(id)
-            }
-            ResolvingFieldTypes(id) => {
-                tcx.map.span(id)
-            }
-            ResolvingClosure(did) |
-            ResolvingAnonTy(did) => {
-                tcx.map.def_id_span(did, DUMMY_SP)
-            }
-            ResolvingDeferredObligation(span) => span
-        }
+impl Locatable for Span {
+    fn to_span(&self, _: &TyCtxt) -> Span {
+        *self
+    }
+}
+
+impl Locatable for ast::NodeId {
+    fn to_span(&self, tcx: &TyCtxt) -> Span {
+        tcx.hir.span(*self)
+    }
+}
+
+impl Locatable for DefIndex {
+    fn to_span(&self, tcx: &TyCtxt) -> Span {
+        let node_id = tcx.hir.def_index_to_node_id(*self);
+        tcx.hir.span(node_id)
+    }
+}
+
+impl Locatable for hir::HirId {
+    fn to_span(&self, tcx: &TyCtxt) -> Span {
+        let node_id = tcx.hir.hir_to_node_id(*self);
+        tcx.hir.span(node_id)
     }
 }
 
@@ -528,89 +677,31 @@ impl<'a, 'gcx, 'tcx> ResolveReason {
 // The Resolver. This is the type folding engine that detects
 // unresolved types and so forth.
 
-struct Resolver<'cx, 'gcx: 'cx+'tcx, 'tcx: 'cx> {
+struct Resolver<'cx, 'gcx: 'cx + 'tcx, 'tcx: 'cx> {
     tcx: TyCtxt<'cx, 'gcx, 'tcx>,
     infcx: &'cx InferCtxt<'cx, 'gcx, 'tcx>,
-    writeback_errors: &'cx Cell<bool>,
-    reason: ResolveReason,
+    span: &'cx dyn Locatable,
+    body: &'gcx hir::Body,
 }
 
 impl<'cx, 'gcx, 'tcx> Resolver<'cx, 'gcx, 'tcx> {
-    fn new(fcx: &'cx FnCtxt<'cx, 'gcx, 'tcx>,
-           reason: ResolveReason)
-           -> Resolver<'cx, 'gcx, 'tcx>
-    {
-        Resolver::from_infcx(fcx, &fcx.writeback_errors, reason)
+    fn new(
+        fcx: &'cx FnCtxt<'cx, 'gcx, 'tcx>,
+        span: &'cx dyn Locatable,
+        body: &'gcx hir::Body,
+    ) -> Resolver<'cx, 'gcx, 'tcx> {
+        Resolver {
+            tcx: fcx.tcx,
+            infcx: fcx,
+            span,
+            body,
+        }
     }
 
-    fn from_infcx(infcx: &'cx InferCtxt<'cx, 'gcx, 'tcx>,
-                  writeback_errors: &'cx Cell<bool>,
-                  reason: ResolveReason)
-                  -> Resolver<'cx, 'gcx, 'tcx>
-    {
-        Resolver { infcx: infcx,
-                   tcx: infcx.tcx,
-                   writeback_errors: writeback_errors,
-                   reason: reason }
-    }
-
-    fn report_error(&self, e: FixupError) {
-        self.writeback_errors.set(true);
+    fn report_error(&self, t: Ty<'tcx>) {
         if !self.tcx.sess.has_errors() {
-            match self.reason {
-                ResolvingExpr(span) => {
-                    struct_span_err!(
-                        self.tcx.sess, span, E0101,
-                        "cannot determine a type for this expression: {}", e)
-                        .span_label(span, &format!("cannot resolve type of expression"))
-                        .emit();
-                }
-
-                ResolvingLocal(span) => {
-                    struct_span_err!(
-                        self.tcx.sess, span, E0102,
-                        "cannot determine a type for this local variable: {}", e)
-                        .span_label(span, &format!("cannot resolve type of variable"))
-                        .emit();
-                }
-
-                ResolvingPattern(span) => {
-                    span_err!(self.tcx.sess, span, E0103,
-                        "cannot determine a type for this pattern binding: {}", e);
-                }
-
-                ResolvingUpvar(upvar_id) => {
-                    let span = self.reason.span(self.tcx);
-                    span_err!(self.tcx.sess, span, E0104,
-                        "cannot resolve lifetime for captured variable `{}`: {}",
-                        self.tcx.local_var_name_str(upvar_id.var_id), e);
-                }
-
-                ResolvingClosure(_) => {
-                    let span = self.reason.span(self.tcx);
-                    span_err!(self.tcx.sess, span, E0196,
-                              "cannot determine a type for this closure")
-                }
-
-                ResolvingFnSig(_) |
-                ResolvingFieldTypes(_) |
-                ResolvingDeferredObligation(_) => {
-                    // any failures here should also fail when
-                    // resolving the patterns, closure types, or
-                    // something else.
-                    let span = self.reason.span(self.tcx);
-                    self.tcx.sess.delay_span_bug(
-                        span,
-                        &format!("cannot resolve some aspect of data for {:?}: {}",
-                                 self.reason, e));
-                }
-
-                ResolvingAnonTy(_) => {
-                    let span = self.reason.span(self.tcx);
-                    span_err!(self.tcx.sess, span, E0563,
-                              "cannot determine a type for this `impl Trait`: {}", e)
-                }
-            }
+            self.infcx
+                .need_type_info_err(Some(self.body.id()), self.span.to_span(&self.tcx), t).emit();
         }
     }
 }
@@ -623,22 +714,23 @@ impl<'cx, 'gcx, 'tcx> TypeFolder<'gcx, 'tcx> for Resolver<'cx, 'gcx, 'tcx> {
     fn fold_ty(&mut self, t: Ty<'tcx>) -> Ty<'tcx> {
         match self.infcx.fully_resolve(&t) {
             Ok(t) => t,
-            Err(e) => {
-                debug!("Resolver::fold_ty: input type `{:?}` not fully resolvable",
-                       t);
-                self.report_error(e);
+            Err(_) => {
+                debug!(
+                    "Resolver::fold_ty: input type `{:?}` not fully resolvable",
+                    t
+                );
+                self.report_error(t);
                 self.tcx().types.err
             }
         }
     }
 
-    fn fold_region(&mut self, r: &'tcx ty::Region) -> &'tcx ty::Region {
+    // FIXME This should be carefully checked
+    // We could use `self.report_error` but it doesn't accept a ty::Region, right now.
+    fn fold_region(&mut self, r: ty::Region<'tcx>) -> ty::Region<'tcx> {
         match self.infcx.fully_resolve(&r) {
             Ok(r) => r,
-            Err(e) => {
-                self.report_error(e);
-                self.tcx.mk_region(ty::ReStatic)
-            }
+            Err(_) => self.tcx.types.re_static,
         }
     }
 }

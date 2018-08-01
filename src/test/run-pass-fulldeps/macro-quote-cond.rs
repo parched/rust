@@ -11,9 +11,11 @@
 // aux-build:cond_plugin.rs
 // ignore-stage1
 
-#![feature(plugin)]
-#![feature(rustc_private)]
-#![plugin(cond_plugin)]
+#![feature(use_extern_macros, proc_macro_non_items)]
+
+extern crate cond_plugin;
+
+use cond_plugin::cond;
 
 fn fact(n : i64) -> i64 {
     if n == 0 {

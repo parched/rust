@@ -11,7 +11,6 @@
 
 #![feature(rustc_private)]
 
-extern crate rbml;
 extern crate serialize;
 
 use std::io::Cursor;
@@ -21,8 +20,7 @@ use std::slice;
 
 use serialize::{Encodable, Encoder};
 use serialize::json;
-
-use rbml::writer;
+use serialize::opaque;
 
 #[derive(Encodable)]
 struct Foo {
@@ -36,24 +34,23 @@ struct Bar {
 
 enum WireProtocol {
     JSON,
-    RBML,
+    Opaque,
     // ...
 }
 
 fn encode_json<T: Encodable>(val: &T, wr: &mut Cursor<Vec<u8>>) {
     write!(wr, "{}", json::as_json(val));
 }
-fn encode_rbml<T: Encodable>(val: &T, wr: &mut Cursor<Vec<u8>>) {
-    let mut encoder = writer::Encoder::new(wr);
+fn encode_opaque<T: Encodable>(val: &T, wr: Vec<u8>) {
+    let mut encoder = opaque::Encoder::new(wr);
     val.encode(&mut encoder);
 }
 
 pub fn main() {
     let target = Foo{baz: false,};
-    let mut wr = Cursor::new(Vec::new());
     let proto = WireProtocol::JSON;
     match proto {
-        WireProtocol::JSON => encode_json(&target, &mut wr),
-        WireProtocol::RBML => encode_rbml(&target, &mut wr)
+        WireProtocol::JSON => encode_json(&target, &mut Cursor::new(Vec::new())),
+        WireProtocol::Opaque => encode_opaque(&target, Vec::new())
     }
 }

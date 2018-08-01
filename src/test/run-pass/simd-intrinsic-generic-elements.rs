@@ -8,9 +8,9 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-#![feature(repr_simd, platform_intrinsics)]
+// ignore-emscripten FIXME(#45351) hits an LLVM assert
 
-// ignore-pretty : (#23623) problems when  ending with // comments
+#![feature(repr_simd, platform_intrinsics)]
 
 #[repr(simd)]
 #[derive(Copy, Clone, Debug, PartialEq)]

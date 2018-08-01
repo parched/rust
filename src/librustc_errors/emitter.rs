@@ -10,35 +10,93 @@
 
 use self::Destination::*;
 
-use syntax_pos::{COMMAND_LINE_SP, DUMMY_SP, FileMap, Span, MultiSpan, CharPos};
+use syntax_pos::{FileMap, Span, MultiSpan};
 
-use {Level, CodeSuggestion, DiagnosticBuilder, SubDiagnostic, CodeMapper};
-use RenderSpan::*;
-use snippet::{StyledString, Style, Annotation, Line};
+use {Level, CodeSuggestion, DiagnosticBuilder, SubDiagnostic, CodeMapperDyn, DiagnosticId};
+use snippet::{Annotation, AnnotationType, Line, MultilineAnnotation, StyledString, Style};
 use styled_buffer::StyledBuffer;
 
+use rustc_data_structures::sync::Lrc;
+use atty;
+use std::borrow::Cow;
 use std::io::prelude::*;
 use std::io;
-use std::rc::Rc;
-use term;
+use std::collections::HashMap;
+use std::cmp::{min, Reverse};
+use termcolor::{StandardStream, ColorChoice, ColorSpec, BufferWriter};
+use termcolor::{WriteColor, Color, Buffer};
+use unicode_width;
+
+const ANONYMIZED_LINE_NUM: &str = "LL";
 
 /// Emitter trait for emitting errors.
 pub trait Emitter {
     /// Emit a structured diagnostic.
     fn emit(&mut self, db: &DiagnosticBuilder);
+
+    /// Check if should show explanations about "rustc --explain"
+    fn should_show_explain(&self) -> bool {
+        true
+    }
 }
 
 impl Emitter for EmitterWriter {
     fn emit(&mut self, db: &DiagnosticBuilder) {
         let mut primary_span = db.span.clone();
         let mut children = db.children.clone();
-        self.fix_multispans_in_std_macros(&mut primary_span, &mut children);
-        self.emit_messages_default(&db.level, &db.message, &db.code, &primary_span, &children);
+        let mut suggestions: &[_] = &[];
+
+        if let Some((sugg, rest)) = db.suggestions.split_first() {
+            if rest.is_empty() &&
+               // don't display multi-suggestions as labels
+               sugg.substitutions.len() == 1 &&
+               // don't display multipart suggestions as labels
+               sugg.substitutions[0].parts.len() == 1 &&
+               // don't display long messages as labels
+               sugg.msg.split_whitespace().count() < 10 &&
+               // don't display multiline suggestions as labels
+               !sugg.substitutions[0].parts[0].snippet.contains('\n') {
+                let substitution = &sugg.substitutions[0].parts[0].snippet.trim();
+                let msg = if substitution.len() == 0 || !sugg.show_code_when_inline {
+                    // This substitution is only removal or we explicitly don't want to show the
+                    // code inline, don't show it
+                    format!("help: {}", sugg.msg)
+                } else {
+                    format!("help: {}: `{}`", sugg.msg, substitution)
+                };
+                primary_span.push_span_label(sugg.substitutions[0].parts[0].span, msg);
+            } else {
+                // if there are multiple suggestions, print them all in full
+                // to be consistent. We could try to figure out if we can
+                // make one (or the first one) inline, but that would give
+                // undue importance to a semi-random suggestion
+                suggestions = &db.suggestions;
+            }
+        }
+
+        self.fix_multispans_in_std_macros(&mut primary_span,
+                                          &mut children,
+                                          db.handler.flags.external_macro_backtrace);
+
+        self.emit_messages_default(&db.level,
+                                   &db.styled_message(),
+                                   &db.code,
+                                   &primary_span,
+                                   &children,
+                                   &suggestions);
+    }
+
+    fn should_show_explain(&self) -> bool {
+        !self.short_message
     }
 }
 
 /// maximum number of lines we will print for each error; arbitrary.
 pub const MAX_HIGHLIGHT_LINES: usize = 6;
+/// maximum number of suggestions to be shown
+///
+/// Arbitrary, but taken from trait import suggestion limit
+pub const MAX_SUGGESTIONS: usize = 4;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ColorConfig {
@@ -48,66 +106,80 @@ pub enum ColorConfig {
 }
 
 impl ColorConfig {
-    fn use_color(&self) -> bool {
+    fn to_color_choice(&self) -> ColorChoice {
         match *self {
-            ColorConfig::Always => true,
-            ColorConfig::Never  => false,
-            ColorConfig::Auto   => stderr_isatty(),
+            ColorConfig::Always => ColorChoice::Always,
+            ColorConfig::Never => ColorChoice::Never,
+            ColorConfig::Auto if atty::is(atty::Stream::Stderr) => {
+                ColorChoice::Auto
+            }
+            ColorConfig::Auto => ColorChoice::Never,
         }
     }
 }
 
 pub struct EmitterWriter {
     dst: Destination,
-    cm: Option<Rc<CodeMapper>>,
+    cm: Option<Lrc<CodeMapperDyn>>,
+    short_message: bool,
+    teach: bool,
+    ui_testing: bool,
 }
 
 struct FileWithAnnotatedLines {
-    file: Rc<FileMap>,
+    file: Lrc<FileMap>,
     lines: Vec<Line>,
-}
-
-
-/// Do not use this for messages that end in `\n` – use `println_maybe_styled` instead. See
-/// `EmitterWriter::print_maybe_styled` for details.
-macro_rules! print_maybe_styled {
-    ($dst: expr, $style: expr, $($arg: tt)*) => {
-        $dst.print_maybe_styled(format_args!($($arg)*), $style, false)
-    }
-}
-
-macro_rules! println_maybe_styled {
-    ($dst: expr, $style: expr, $($arg: tt)*) => {
-        $dst.print_maybe_styled(format_args!($($arg)*), $style, true)
-    }
+    multiline_depth: usize,
 }
 
 impl EmitterWriter {
     pub fn stderr(color_config: ColorConfig,
-                  code_map: Option<Rc<CodeMapper>>)
+                  code_map: Option<Lrc<CodeMapperDyn>>,
+                  short_message: bool,
+                  teach: bool)
                   -> EmitterWriter {
-        if color_config.use_color() {
-            let dst = Destination::from_stderr();
-            EmitterWriter { dst: dst,
-                            cm: code_map}
-        } else {
-            EmitterWriter { dst: Raw(Box::new(io::stderr())),
-                            cm: code_map}
+        let dst = Destination::from_stderr(color_config);
+        EmitterWriter {
+            dst,
+            cm: code_map,
+            short_message,
+            teach,
+            ui_testing: false,
         }
     }
 
-    pub fn new(dst: Box<Write + Send>,
-               code_map: Option<Rc<CodeMapper>>)
+    pub fn new(dst: Box<dyn Write + Send>,
+               code_map: Option<Lrc<CodeMapperDyn>>,
+               short_message: bool,
+               teach: bool)
                -> EmitterWriter {
-        EmitterWriter { dst: Raw(dst),
-                        cm: code_map}
+        EmitterWriter {
+            dst: Raw(dst),
+            cm: code_map,
+            short_message,
+            teach,
+            ui_testing: false,
+        }
     }
 
-    fn preprocess_annotations(&self, msp: &MultiSpan) -> Vec<FileWithAnnotatedLines> {
+    pub fn ui_testing(mut self, ui_testing: bool) -> Self {
+        self.ui_testing = ui_testing;
+        self
+    }
+
+    fn maybe_anonymized(&self, line_num: usize) -> String {
+        if self.ui_testing {
+            ANONYMIZED_LINE_NUM.to_string()
+        } else {
+            line_num.to_string()
+        }
+    }
+
+    fn preprocess_annotations(&mut self, msp: &MultiSpan) -> Vec<FileWithAnnotatedLines> {
         fn add_annotation_to_file(file_vec: &mut Vec<FileWithAnnotatedLines>,
-                                    file: Rc<FileMap>,
-                                    line_index: usize,
-                                    ann: Annotation) {
+                                  file: Lrc<FileMap>,
+                                  line_index: usize,
+                                  ann: Annotation) {
 
             for slot in file_vec.iter_mut() {
                 // Look through each of our files for the one we're adding to
@@ -121,7 +193,7 @@ impl EmitterWriter {
                     }
                     // We don't have a line yet, create one
                     slot.lines.push(Line {
-                        line_index: line_index,
+                        line_index,
                         annotations: vec![ann],
                     });
                     slot.lines.sort();
@@ -130,83 +202,176 @@ impl EmitterWriter {
             }
             // This is the first time we're seeing the file
             file_vec.push(FileWithAnnotatedLines {
-                file: file,
+                file,
                 lines: vec![Line {
-                                line_index: line_index,
+                                line_index,
                                 annotations: vec![ann],
                             }],
+                multiline_depth: 0,
             });
         }
 
         let mut output = vec![];
+        let mut multiline_annotations = vec![];
 
         if let Some(ref cm) = self.cm {
             for span_label in msp.span_labels() {
-                if span_label.span == DUMMY_SP || span_label.span == COMMAND_LINE_SP {
+                if span_label.span.is_dummy() {
                     continue;
                 }
-                let lo = cm.lookup_char_pos(span_label.span.lo);
-                let mut hi = cm.lookup_char_pos(span_label.span.hi);
-                let mut is_minimized = false;
 
-                // If the span is multi-line, simplify down to the span of one character
-                if lo.line != hi.line {
-                    hi.line = lo.line;
-                    hi.col = CharPos(lo.col.0 + 1);
-                    is_minimized = true;
-                }
+                let lo = cm.lookup_char_pos(span_label.span.lo());
+                let mut hi = cm.lookup_char_pos(span_label.span.hi());
 
                 // Watch out for "empty spans". If we get a span like 6..6, we
                 // want to just display a `^` at 6, so convert that to
                 // 6..7. This is degenerate input, but it's best to degrade
                 // gracefully -- and the parser likes to supply a span like
                 // that for EOF, in particular.
-                if lo.col == hi.col {
-                    hi.col = CharPos(lo.col.0 + 1);
+                if lo.col_display == hi.col_display && lo.line == hi.line {
+                    hi.col_display += 1;
                 }
 
-                add_annotation_to_file(&mut output,
-                                        lo.file,
-                                        lo.line,
-                                        Annotation {
-                                            start_col: lo.col.0,
-                                            end_col: hi.col.0,
-                                            is_primary: span_label.is_primary,
-                                            is_minimized: is_minimized,
-                                            label: span_label.label.clone(),
-                                        });
+                let ann_type = if lo.line != hi.line {
+                    let ml = MultilineAnnotation {
+                        depth: 1,
+                        line_start: lo.line,
+                        line_end: hi.line,
+                        start_col: lo.col_display,
+                        end_col: hi.col_display,
+                        is_primary: span_label.is_primary,
+                        label: span_label.label.clone(),
+                    };
+                    multiline_annotations.push((lo.file.clone(), ml.clone()));
+                    AnnotationType::Multiline(ml)
+                } else {
+                    AnnotationType::Singleline
+                };
+                let ann = Annotation {
+                    start_col: lo.col_display,
+                    end_col: hi.col_display,
+                    is_primary: span_label.is_primary,
+                    label: span_label.label.clone(),
+                    annotation_type: ann_type,
+                };
+
+                if !ann.is_multiline() {
+                    add_annotation_to_file(&mut output,
+                                           lo.file,
+                                           lo.line,
+                                           ann);
+                }
             }
+        }
+
+        // Find overlapping multiline annotations, put them at different depths
+        multiline_annotations.sort_by_key(|&(_, ref ml)| (ml.line_start, ml.line_end));
+        for item in multiline_annotations.clone() {
+            let ann = item.1;
+            for item in multiline_annotations.iter_mut() {
+                let ref mut a = item.1;
+                // Move all other multiline annotations overlapping with this one
+                // one level to the right.
+                if &ann != a &&
+                    num_overlap(ann.line_start, ann.line_end, a.line_start, a.line_end, true)
+                {
+                    a.increase_depth();
+                } else {
+                    break;
+                }
+            }
+        }
+
+        let mut max_depth = 0;  // max overlapping multiline spans
+        for (file, ann) in multiline_annotations {
+            if ann.depth > max_depth {
+                max_depth = ann.depth;
+            }
+            add_annotation_to_file(&mut output, file.clone(), ann.line_start, ann.as_start());
+            let middle = min(ann.line_start + 4, ann.line_end);
+            for line in ann.line_start + 1..middle {
+                add_annotation_to_file(&mut output, file.clone(), line, ann.as_line());
+            }
+            if middle < ann.line_end - 1 {
+                for line in ann.line_end - 1..ann.line_end {
+                    add_annotation_to_file(&mut output, file.clone(), line, ann.as_line());
+                }
+            }
+            add_annotation_to_file(&mut output, file, ann.line_end, ann.as_end());
+        }
+        for file_vec in output.iter_mut() {
+            file_vec.multiline_depth = max_depth;
         }
         output
     }
 
     fn render_source_line(&self,
                           buffer: &mut StyledBuffer,
-                          file: Rc<FileMap>,
+                          file: Lrc<FileMap>,
                           line: &Line,
-                          width_offset: usize) {
-        let source_string = file.get_line(line.line_index - 1)
-            .unwrap_or("");
+                          width_offset: usize,
+                          code_offset: usize) -> Vec<(usize, Style)> {
+        if line.line_index == 0 {
+            return Vec::new();
+        }
+
+        let source_string = match file.get_line(line.line_index - 1) {
+            Some(s) => s,
+            None => return Vec::new(),
+        };
 
         let line_offset = buffer.num_lines();
 
         // First create the source line we will highlight.
-        buffer.puts(line_offset, width_offset, &source_string, Style::Quotation);
+        buffer.puts(line_offset, code_offset, &source_string, Style::Quotation);
         buffer.puts(line_offset,
                     0,
-                    &(line.line_index.to_string()),
+                    &self.maybe_anonymized(line.line_index),
                     Style::LineNumber);
 
         draw_col_separator(buffer, line_offset, width_offset - 2);
 
-        if line.annotations.is_empty() {
-            return;
+        // Special case when there's only one annotation involved, it is the start of a multiline
+        // span and there's no text at the beginning of the code line. Instead of doing the whole
+        // graph:
+        //
+        // 2 |   fn foo() {
+        //   |  _^
+        // 3 | |
+        // 4 | | }
+        //   | |_^ test
+        //
+        // we simplify the output to:
+        //
+        // 2 | / fn foo() {
+        // 3 | |
+        // 4 | | }
+        //   | |_^ test
+        if line.annotations.len() == 1 {
+            if let Some(ref ann) = line.annotations.get(0) {
+                if let AnnotationType::MultilineStart(depth) = ann.annotation_type {
+                    if source_string.chars()
+                                    .take(ann.start_col)
+                                    .all(|c| c.is_whitespace()) {
+                        let style = if ann.is_primary {
+                            Style::UnderlinePrimary
+                        } else {
+                            Style::UnderlineSecondary
+                        };
+                        buffer.putc(line_offset,
+                                    width_offset + depth - 1,
+                                    '/',
+                                    style);
+                        return vec![(depth, style)];
+                    }
+                }
+            }
         }
 
         // We want to display like this:
         //
         //      vec.push(vec.pop().unwrap());
-        //      ---      ^^^               _ previous borrow ends here
+        //      ---      ^^^               - previous borrow ends here
         //      |        |
         //      |        error occurs here
         //      previous borrow of `vec` occurs here
@@ -220,51 +385,38 @@ impl EmitterWriter {
         //      previous borrow of `vec` occurs here
         //
         // For this reason, we group the lines into "highlight lines"
-        // and "annotations lines", where the highlight lines have the `~`.
+        // and "annotations lines", where the highlight lines have the `^`.
 
         // Sort the annotations by (start, end col)
+        // The labels are reversed, sort and then reversed again.
+        // Consider a list of annotations (A1, A2, C1, C2, B1, B2) where
+        // the letter signifies the span. Here we are only sorting by the
+        // span and hence, the order of the elements with the same span will
+        // not change. On reversing the ordering (|a, b| but b.cmp(a)), you get
+        // (C1, C2, B1, B2, A1, A2). All the elements with the same span are
+        // still ordered first to last, but all the elements with different
+        // spans are ordered by their spans in last to first order. Last to
+        // first order is important, because the jiggly lines and | are on
+        // the left, so the rightmost span needs to be rendered first,
+        // otherwise the lines would end up needing to go over a message.
+
         let mut annotations = line.annotations.clone();
-        annotations.sort();
+        annotations.sort_by_key(|a| Reverse(a.start_col));
 
-        // Next, create the highlight line.
-        for annotation in &annotations {
-            for p in annotation.start_col..annotation.end_col {
-                if annotation.is_primary {
-                    buffer.putc(line_offset + 1,
-                                width_offset + p,
-                                '^',
-                                Style::UnderlinePrimary);
-                    if !annotation.is_minimized {
-                        buffer.set_style(line_offset,
-                                            width_offset + p,
-                                            Style::UnderlinePrimary);
-                    }
-                } else {
-                    buffer.putc(line_offset + 1,
-                                width_offset + p,
-                                '-',
-                                Style::UnderlineSecondary);
-                    if !annotation.is_minimized {
-                        buffer.set_style(line_offset,
-                                            width_offset + p,
-                                            Style::UnderlineSecondary);
-                    }
-                }
-            }
-        }
-        draw_col_separator(buffer, line_offset + 1, width_offset - 2);
-
-        // Now we are going to write labels in. To start, we'll exclude
-        // the annotations with no labels.
-        let (labeled_annotations, unlabeled_annotations): (Vec<_>, _) = annotations.into_iter()
-            .partition(|a| a.label.is_some());
-
-        // If there are no annotations that need text, we're done.
-        if labeled_annotations.is_empty() {
-            return;
-        }
-        // Now add the text labels. We try, when possible, to stick the rightmost
-        // annotation at the end of the highlight line:
+        // First, figure out where each label will be positioned.
+        //
+        // In the case where you have the following annotations:
+        //
+        //      vec.push(vec.pop().unwrap());
+        //      --------                    - previous borrow ends here [C]
+        //      ||
+        //      |this makes no sense [B]
+        //      previous borrow of `vec` occurs here [A]
+        //
+        // `annotations_position` will hold [(2, A), (1, B), (0, C)].
+        //
+        // We try, when possible, to stick the rightmost annotation at the end
+        // of the highlight line:
         //
         //      vec.push(vec.pop().unwrap());
         //      ---      ---               - previous borrow ends here
@@ -297,86 +449,297 @@ impl EmitterWriter {
         // which is...less weird, at least. In fact, in general, if
         // the rightmost span overlaps with any other span, we should
         // use the "hang below" version, so we can at least make it
-        // clear where the span *starts*.
-        let mut labeled_annotations = &labeled_annotations[..];
-        match labeled_annotations.split_last().unwrap() {
-            (last, previous) => {
-                if previous.iter()
-                    .chain(&unlabeled_annotations)
-                    .all(|a| !overlaps(a, last)) {
-                    // append the label afterwards; we keep it in a separate
-                    // string
-                    let highlight_label: String = format!(" {}", last.label.as_ref().unwrap());
-                    if last.is_primary {
-                        buffer.append(line_offset + 1, &highlight_label, Style::LabelPrimary);
+        // clear where the span *starts*. There's an exception for this
+        // logic, when the labels do not have a message:
+        //
+        //      fn foo(x: u32) {
+        //      --------------
+        //             |
+        //             x_span
+        //
+        // instead of:
+        //
+        //      fn foo(x: u32) {
+        //      --------------
+        //      |      |
+        //      |      x_span
+        //      <EMPTY LINE>
+        //
+        let mut annotations_position = vec![];
+        let mut line_len = 0;
+        let mut p = 0;
+        for (i, annotation) in annotations.iter().enumerate() {
+            for (j, next) in annotations.iter().enumerate() {
+                if overlaps(next, annotation, 0)  // This label overlaps with another one and both
+                    && annotation.has_label()     // take space (they have text and are not
+                    && j > i                      // multiline lines).
+                    && p == 0  // We're currently on the first line, move the label one line down
+                {
+                    // This annotation needs a new line in the output.
+                    p += 1;
+                    break;
+                }
+            }
+            annotations_position.push((p, annotation));
+            for (j, next) in annotations.iter().enumerate() {
+                if j > i  {
+                    let l = if let Some(ref label) = next.label {
+                        label.len() + 2
                     } else {
-                        buffer.append(line_offset + 1, &highlight_label, Style::LabelSecondary);
+                        0
+                    };
+                    if (overlaps(next, annotation, l) // Do not allow two labels to be in the same
+                                                     // line if they overlap including padding, to
+                                                     // avoid situations like:
+                                                     //
+                                                     //      fn foo(x: u32) {
+                                                     //      -------^------
+                                                     //      |      |
+                                                     //      fn_spanx_span
+                                                     //
+                        && annotation.has_label()    // Both labels must have some text, otherwise
+                        && next.has_label())         // they are not overlapping.
+                                                     // Do not add a new line if this annotation
+                                                     // or the next are vertical line placeholders.
+                        || (annotation.takes_space() // If either this or the next annotation is
+                            && next.has_label())     // multiline start/end, move it to a new line
+                        || (annotation.has_label()   // so as not to overlap the orizontal lines.
+                            && next.takes_space())
+                        || (annotation.takes_space() && next.takes_space())
+                        || (overlaps(next, annotation, l)
+                            && next.end_col <= annotation.end_col
+                            && next.has_label()
+                            && p == 0)  // Avoid #42595.
+                    {
+                        // This annotation needs a new line in the output.
+                        p += 1;
+                        break;
                     }
-                    labeled_annotations = previous;
                 }
+            }
+            if line_len < p {
+                line_len = p;
             }
         }
 
-        // If that's the last annotation, we're done
-        if labeled_annotations.is_empty() {
-            return;
+        if line_len != 0 {
+            line_len += 1;
         }
 
-        for (index, annotation) in labeled_annotations.iter().enumerate() {
-            // Leave:
-            // - 1 extra line
-            // - One line for each thing that comes after
-            let comes_after = labeled_annotations.len() - index - 1;
-            let blank_lines = 3 + comes_after;
+        // If there are no annotations or the only annotations on this line are
+        // MultilineLine, then there's only code being shown, stop processing.
+        if line.annotations.iter().all(|a| a.is_line()) {
+            return vec![];
+        }
 
-            // For each blank line, draw a `|` at our column. The
-            // text ought to be long enough for this.
-            for index in 2..blank_lines {
-                if annotation.is_primary {
-                    buffer.putc(line_offset + index,
-                                width_offset + annotation.start_col,
-                                '|',
-                                Style::UnderlinePrimary);
-                } else {
-                    buffer.putc(line_offset + index,
-                                width_offset + annotation.start_col,
-                                '|',
-                                Style::UnderlineSecondary);
-                }
-                draw_col_separator(buffer, line_offset + index, width_offset - 2);
-            }
+        // Write the colunmn separator.
+        //
+        // After this we will have:
+        //
+        // 2 |   fn foo() {
+        //   |
+        //   |
+        //   |
+        // 3 |
+        // 4 |   }
+        //   |
+        for pos in 0..line_len + 1 {
+            draw_col_separator(buffer, line_offset + pos + 1, width_offset - 2);
+            buffer.putc(line_offset + pos + 1,
+                        width_offset - 2,
+                        '|',
+                        Style::LineNumber);
+        }
 
-            if annotation.is_primary {
-                buffer.puts(line_offset + blank_lines,
-                            width_offset + annotation.start_col,
-                            annotation.label.as_ref().unwrap(),
-                            Style::LabelPrimary);
+        // Write the horizontal lines for multiline annotations
+        // (only the first and last lines need this).
+        //
+        // After this we will have:
+        //
+        // 2 |   fn foo() {
+        //   |  __________
+        //   |
+        //   |
+        // 3 |
+        // 4 |   }
+        //   |  _
+        for &(pos, annotation) in &annotations_position {
+            let style = if annotation.is_primary {
+                Style::UnderlinePrimary
             } else {
-                buffer.puts(line_offset + blank_lines,
-                            width_offset + annotation.start_col,
-                            annotation.label.as_ref().unwrap(),
-                            Style::LabelSecondary);
+                Style::UnderlineSecondary
+            };
+            let pos = pos + 1;
+            match annotation.annotation_type {
+                AnnotationType::MultilineStart(depth) |
+                AnnotationType::MultilineEnd(depth) => {
+                    draw_range(buffer,
+                               '_',
+                               line_offset + pos,
+                               width_offset + depth,
+                               code_offset + annotation.start_col,
+                               style);
+                }
+                _ if self.teach => {
+                    buffer.set_style_range(line_offset,
+                                           code_offset + annotation.start_col,
+                                           code_offset + annotation.end_col,
+                                           style,
+                                           annotation.is_primary);
+                }
+                _ => {}
             }
-            draw_col_separator(buffer, line_offset + blank_lines, width_offset - 2);
         }
+
+        // Write the vertical lines for labels that are on a different line as the underline.
+        //
+        // After this we will have:
+        //
+        // 2 |   fn foo() {
+        //   |  __________
+        //   | |    |
+        //   | |
+        // 3 |
+        // 4 | | }
+        //   | |_
+        for &(pos, annotation) in &annotations_position {
+            let style = if annotation.is_primary {
+                Style::UnderlinePrimary
+            } else {
+                Style::UnderlineSecondary
+            };
+            let pos = pos + 1;
+
+            if pos > 1 && (annotation.has_label() || annotation.takes_space()) {
+                for p in line_offset + 1..line_offset + pos + 1 {
+                    buffer.putc(p,
+                                code_offset + annotation.start_col,
+                                '|',
+                                style);
+                }
+            }
+            match annotation.annotation_type {
+                AnnotationType::MultilineStart(depth) => {
+                    for p in line_offset + pos + 1..line_offset + line_len + 2 {
+                        buffer.putc(p,
+                                    width_offset + depth - 1,
+                                    '|',
+                                    style);
+                    }
+                }
+                AnnotationType::MultilineEnd(depth) => {
+                    for p in line_offset..line_offset + pos + 1 {
+                        buffer.putc(p,
+                                    width_offset + depth - 1,
+                                    '|',
+                                    style);
+                    }
+                }
+                _ => (),
+            }
+        }
+
+        // Write the labels on the annotations that actually have a label.
+        //
+        // After this we will have:
+        //
+        // 2 |   fn foo() {
+        //   |  __________
+        //   |      |
+        //   |      something about `foo`
+        // 3 |
+        // 4 |   }
+        //   |  _  test
+        for &(pos, annotation) in &annotations_position {
+            let style = if annotation.is_primary {
+                Style::LabelPrimary
+            } else {
+                Style::LabelSecondary
+            };
+            let (pos, col) = if pos == 0 {
+                (pos + 1, annotation.end_col + 1)
+            } else {
+                (pos + 2, annotation.start_col)
+            };
+            if let Some(ref label) = annotation.label {
+                buffer.puts(line_offset + pos,
+                            code_offset + col,
+                            &label,
+                            style);
+            }
+        }
+
+        // Sort from biggest span to smallest span so that smaller spans are
+        // represented in the output:
+        //
+        // x | fn foo()
+        //   | ^^^---^^
+        //   | |  |
+        //   | |  something about `foo`
+        //   | something about `fn foo()`
+        annotations_position.sort_by(|a, b| {
+            // Decreasing order
+            a.1.len().cmp(&b.1.len()).reverse()
+        });
+
+        // Write the underlines.
+        //
+        // After this we will have:
+        //
+        // 2 |   fn foo() {
+        //   |  ____-_____^
+        //   |      |
+        //   |      something about `foo`
+        // 3 |
+        // 4 |   }
+        //   |  _^  test
+        for &(_, annotation) in &annotations_position {
+            let (underline, style) = if annotation.is_primary {
+                ('^', Style::UnderlinePrimary)
+            } else {
+                ('-', Style::UnderlineSecondary)
+            };
+            for p in annotation.start_col..annotation.end_col {
+                buffer.putc(line_offset + 1,
+                            code_offset + p,
+                            underline,
+                            style);
+            }
+        }
+        annotations_position.iter().filter_map(|&(_, annotation)| {
+            match annotation.annotation_type {
+                AnnotationType::MultilineStart(p) | AnnotationType::MultilineEnd(p) => {
+                    let style = if annotation.is_primary {
+                        Style::LabelPrimary
+                    } else {
+                        Style::LabelSecondary
+                    };
+                    Some((p, style))
+                }
+                _ => None
+            }
+
+        }).collect::<Vec<_>>()
     }
 
     fn get_multispan_max_line_num(&mut self, msp: &MultiSpan) -> usize {
         let mut max = 0;
         if let Some(ref cm) = self.cm {
             for primary_span in msp.primary_spans() {
-                if primary_span != &DUMMY_SP && primary_span != &COMMAND_LINE_SP {
-                    let hi = cm.lookup_char_pos(primary_span.hi);
+                if !primary_span.is_dummy() {
+                    let hi = cm.lookup_char_pos(primary_span.hi());
                     if hi.line > max {
                         max = hi.line;
                     }
                 }
             }
-            for span_label in msp.span_labels() {
-                if span_label.span != DUMMY_SP && span_label.span != COMMAND_LINE_SP {
-                    let hi = cm.lookup_char_pos(span_label.span.hi);
-                    if hi.line > max {
-                        max = hi.line;
+            if !self.short_message {
+                for span_label in msp.span_labels() {
+                    if !span_label.span.is_dummy() {
+                        let hi = cm.lookup_char_pos(span_label.span.hi());
+                        if hi.line > max {
+                            max = hi.line;
+                        }
                     }
                 }
             }
@@ -384,7 +747,7 @@ impl EmitterWriter {
         max
     }
 
-    fn get_max_line_num(&mut self, span: &MultiSpan, children: &Vec<SubDiagnostic>) -> usize {
+    fn get_max_line_num(&mut self, span: &MultiSpan, children: &[SubDiagnostic]) -> usize {
         let mut max = 0;
 
         let primary = self.get_multispan_max_line_num(span);
@@ -400,7 +763,9 @@ impl EmitterWriter {
     // This "fixes" MultiSpans that contain Spans that are pointing to locations inside of
     // <*macros>. Since these locations are often difficult to read, we move these Spans from
     // <*macros> to their corresponding use site.
-    fn fix_multispan_in_std_macros(&mut self, span: &mut MultiSpan) -> bool {
+    fn fix_multispan_in_std_macros(&mut self,
+                                   span: &mut MultiSpan,
+                                   always_backtrace: bool) -> bool {
         let mut spans_updated = false;
 
         if let Some(ref cm) = self.cm {
@@ -409,29 +774,50 @@ impl EmitterWriter {
 
             // First, find all the spans in <*macros> and point instead at their use site
             for sp in span.primary_spans() {
-                if (*sp == COMMAND_LINE_SP) || (*sp == DUMMY_SP) {
+                if sp.is_dummy() {
                     continue;
                 }
-                if cm.span_to_filename(sp.clone()).contains("macros>") {
-                    let v = cm.macro_backtrace(sp.clone());
-                    if let Some(use_site) = v.last() {
-                        before_after.push((sp.clone(), use_site.call_site.clone()));
-                    }
+                let call_sp = cm.call_span_if_macro(*sp);
+                if call_sp != *sp && !always_backtrace {
+                    before_after.push((*sp, call_sp));
                 }
-                for trace in cm.macro_backtrace(sp.clone()).iter().rev() {
+                let backtrace_len = sp.macro_backtrace().len();
+                for (i, trace) in sp.macro_backtrace().iter().rev().enumerate() {
                     // Only show macro locations that are local
                     // and display them like a span_note
                     if let Some(def_site) = trace.def_site_span {
-                        if (def_site == COMMAND_LINE_SP) || (def_site == DUMMY_SP) {
+                        if def_site.is_dummy() {
                             continue;
                         }
+                        if always_backtrace {
+                            new_labels.push((def_site,
+                                             format!("in this expansion of `{}`{}",
+                                                     trace.macro_decl_name,
+                                                     if backtrace_len > 2 {
+                                                         // if backtrace_len == 1 it'll be pointed
+                                                         // at by "in this macro invocation"
+                                                         format!(" (#{})", i + 1)
+                                                     } else {
+                                                         "".to_string()
+                                                     })));
+                        }
                         // Check to make sure we're not in any <*macros>
-                        if !cm.span_to_filename(def_site).contains("macros>") &&
-                            !trace.macro_decl_name.starts_with("#[")
-                        {
+                        if !cm.span_to_filename(def_site).is_macros() &&
+                           !trace.macro_decl_name.starts_with("desugaring of ") &&
+                           !trace.macro_decl_name.starts_with("#[") ||
+                           always_backtrace {
                             new_labels.push((trace.call_site,
-                                             "in this macro invocation".to_string()));
-                            break;
+                                             format!("in this macro invocation{}",
+                                                     if backtrace_len > 2 && always_backtrace {
+                                                         // only specify order when the macro
+                                                         // backtrace is multiple levels deep
+                                                         format!(" (#{})", i + 1)
+                                                     } else {
+                                                         "".to_string()
+                                                     })));
+                            if !always_backtrace {
+                                break;
+                            }
                         }
                     }
                 }
@@ -440,11 +826,13 @@ impl EmitterWriter {
                 span.push_span_label(label_span, label_text);
             }
             for sp_label in span.span_labels() {
-                if (sp_label.span == COMMAND_LINE_SP) || (sp_label.span == DUMMY_SP) {
+                if sp_label.span.is_dummy() {
                     continue;
                 }
-                if cm.span_to_filename(sp_label.span.clone()).contains("macros>") {
-                    let v = cm.macro_backtrace(sp_label.span.clone());
+                if cm.span_to_filename(sp_label.span.clone()).is_macros() &&
+                    !always_backtrace
+                {
+                    let v = sp_label.span.macro_backtrace();
                     if let Some(use_site) = v.last() {
                         before_after.push((sp_label.span.clone(), use_site.call_site.clone()));
                     }
@@ -465,53 +853,146 @@ impl EmitterWriter {
     // will change the span to point at the use site.
     fn fix_multispans_in_std_macros(&mut self,
                                     span: &mut MultiSpan,
-                                    children: &mut Vec<SubDiagnostic>) {
-        let mut spans_updated = self.fix_multispan_in_std_macros(span);
+                                    children: &mut Vec<SubDiagnostic>,
+                                    backtrace: bool) {
+        let mut spans_updated = self.fix_multispan_in_std_macros(span, backtrace);
         for child in children.iter_mut() {
-            spans_updated |= self.fix_multispan_in_std_macros(&mut child.span);
+            spans_updated |= self.fix_multispan_in_std_macros(&mut child.span, backtrace);
         }
         if spans_updated {
             children.push(SubDiagnostic {
                 level: Level::Note,
-                message: "this error originates in a macro from the standard library".to_string(),
+                message: vec![
+                    ("this error originates in a macro outside of the current crate \
+                      (in Nightly builds, run with -Z external-macro-backtrace \
+                       for more info)".to_string(),
+                     Style::NoStyle),
+                ],
                 span: MultiSpan::new(),
-                render_span: None
+                render_span: None,
             });
+        }
+    }
+
+    /// Add a left margin to every line but the first, given a padding length and the label being
+    /// displayed, keeping the provided highlighting.
+    fn msg_to_buffer(&self,
+                     buffer: &mut StyledBuffer,
+                     msg: &[(String, Style)],
+                     padding: usize,
+                     label: &str,
+                     override_style: Option<Style>) {
+
+        // The extra 5 ` ` is padding that's always needed to align to the `note: `:
+        //
+        //   error: message
+        //     --> file.rs:13:20
+        //      |
+        //   13 |     <CODE>
+        //      |      ^^^^
+        //      |
+        //      = note: multiline
+        //              message
+        //   ++^^^----xx
+        //    |  |   | |
+        //    |  |   | magic `2`
+        //    |  |   length of label
+        //    |  magic `3`
+        //    `max_line_num_len`
+        let padding = " ".repeat(padding + label.len() + 5);
+
+        /// Return whether `style`, or the override if present and the style is `NoStyle`.
+        fn style_or_override(style: Style, override_style: Option<Style>) -> Style {
+            if let Some(o) = override_style {
+                if style == Style::NoStyle {
+                    return o;
+                }
+            }
+            style
+        }
+
+        let mut line_number = 0;
+
+        // Provided the following diagnostic message:
+        //
+        //     let msg = vec![
+        //       ("
+        //       ("highlighted multiline\nstring to\nsee how it ", Style::NoStyle),
+        //       ("looks", Style::Highlight),
+        //       ("with\nvery ", Style::NoStyle),
+        //       ("weird", Style::Highlight),
+        //       (" formats\n", Style::NoStyle),
+        //       ("see?", Style::Highlight),
+        //     ];
+        //
+        // the expected output on a note is (* surround the highlighted text)
+        //
+        //        = note: highlighted multiline
+        //                string to
+        //                see how it *looks* with
+        //                very *weird* formats
+        //                see?
+        for &(ref text, ref style) in msg.iter() {
+            let lines = text.split('\n').collect::<Vec<_>>();
+            if lines.len() > 1 {
+                for (i, line) in lines.iter().enumerate() {
+                    if i != 0 {
+                        line_number += 1;
+                        buffer.append(line_number, &padding, Style::NoStyle);
+                    }
+                    buffer.append(line_number, line, style_or_override(*style, override_style));
+                }
+            } else {
+                buffer.append(line_number, text, style_or_override(*style, override_style));
+            }
         }
     }
 
     fn emit_message_default(&mut self,
                             msp: &MultiSpan,
-                            msg: &str,
-                            code: &Option<String>,
+                            msg: &[(String, Style)],
+                            code: &Option<DiagnosticId>,
                             level: &Level,
                             max_line_num_len: usize,
                             is_secondary: bool)
                             -> io::Result<()> {
         let mut buffer = StyledBuffer::new();
+        let header_style = if is_secondary {
+            Style::HeaderMsg
+        } else {
+            Style::MainHeaderMsg
+        };
 
-        if msp.primary_spans().is_empty() && msp.span_labels().is_empty() && is_secondary {
+        if msp.primary_spans().is_empty() && msp.span_labels().is_empty() && is_secondary
+           && !self.short_message {
             // This is a secondary message with no span info
             for _ in 0..max_line_num_len {
                 buffer.prepend(0, " ", Style::NoStyle);
             }
             draw_note_separator(&mut buffer, 0, max_line_num_len + 1);
-            buffer.append(0, &level.to_string(), Style::HeaderMsg);
-            buffer.append(0, ": ", Style::NoStyle);
-            buffer.append(0, msg, Style::NoStyle);
-        }
-        else {
-            buffer.append(0, &level.to_string(), Style::Level(level.clone()));
-            match code {
-                &Some(ref code) => {
-                    buffer.append(0, "[", Style::Level(level.clone()));
-                    buffer.append(0, &code, Style::Level(level.clone()));
-                    buffer.append(0, "]", Style::Level(level.clone()));
-                }
-                _ => {}
+            let level_str = level.to_string();
+            if !level_str.is_empty() {
+                buffer.append(0, &level_str, Style::MainHeaderMsg);
+                buffer.append(0, ": ", Style::NoStyle);
             }
-            buffer.append(0, ": ", Style::HeaderMsg);
-            buffer.append(0, msg, Style::HeaderMsg);
+            self.msg_to_buffer(&mut buffer, msg, max_line_num_len, "note", None);
+        } else {
+            let level_str = level.to_string();
+            if !level_str.is_empty() {
+                buffer.append(0, &level_str, Style::Level(level.clone()));
+            }
+            // only render error codes, not lint codes
+            if let Some(DiagnosticId::Error(ref code)) = *code {
+                buffer.append(0, "[", Style::Level(level.clone()));
+                buffer.append(0, &code, Style::Level(level.clone()));
+                buffer.append(0, "]", Style::Level(level.clone()));
+            }
+            if !level_str.is_empty() {
+                buffer.append(0, ": ", header_style);
+            }
+            for &(ref text, _) in msg.iter() {
+                buffer.append(0, text, header_style);
+            }
         }
 
         // Preprocess all the annotations so that they are grouped by file and by line number
@@ -519,44 +1000,59 @@ impl EmitterWriter {
         let mut annotated_files = self.preprocess_annotations(msp);
 
         // Make sure our primary file comes first
-        let primary_lo =
-            if let (Some(ref cm), Some(ref primary_span)) = (self.cm.as_ref(),
-                                                             msp.primary_span().as_ref()) {
-                if primary_span != &&DUMMY_SP && primary_span != &&COMMAND_LINE_SP {
-                    cm.lookup_char_pos(primary_span.lo)
-                }
-                else {
-                    emit_to_destination(&buffer.render(), level, &mut self.dst)?;
-                    return Ok(());
-                }
+        let (primary_lo, cm) = if let (Some(cm), Some(ref primary_span)) =
+            (self.cm.as_ref(), msp.primary_span().as_ref()) {
+            if !primary_span.is_dummy() {
+                (cm.lookup_char_pos(primary_span.lo()), cm)
             } else {
-                // If we don't have span information, emit and exit
-                emit_to_destination(&buffer.render(), level, &mut self.dst)?;
+                emit_to_destination(&buffer.render(), level, &mut self.dst, self.short_message)?;
                 return Ok(());
-            };
+            }
+        } else {
+            // If we don't have span information, emit and exit
+            emit_to_destination(&buffer.render(), level, &mut self.dst, self.short_message)?;
+            return Ok(());
+        };
         if let Ok(pos) =
-                annotated_files.binary_search_by(|x| x.file.name.cmp(&primary_lo.file.name)) {
+            annotated_files.binary_search_by(|x| x.file.name.cmp(&primary_lo.file.name)) {
             annotated_files.swap(0, pos);
         }
 
         // Print out the annotate source lines that correspond with the error
         for annotated_file in annotated_files {
+            // we can't annotate anything if the source is unavailable.
+            if !cm.ensure_filemap_source_present(annotated_file.file.clone()) {
+                continue;
+            }
+
             // print out the span location and spacer before we print the annotated source
             // to do this, we need to know if this span will be primary
             let is_primary = primary_lo.file.name == annotated_file.file.name;
             if is_primary {
-                // remember where we are in the output buffer for easy reference
-                let buffer_msg_line_offset = buffer.num_lines();
-
-                buffer.prepend(buffer_msg_line_offset, "--> ", Style::LineNumber);
                 let loc = primary_lo.clone();
-                buffer.append(buffer_msg_line_offset,
-                                &format!("{}:{}:{}", loc.file.name, loc.line, loc.col.0 + 1),
-                                Style::LineAndColumn);
-                for _ in 0..max_line_num_len {
-                    buffer.prepend(buffer_msg_line_offset, " ", Style::NoStyle);
+                if !self.short_message {
+                    // remember where we are in the output buffer for easy reference
+                    let buffer_msg_line_offset = buffer.num_lines();
+
+                    buffer.prepend(buffer_msg_line_offset, "--> ", Style::LineNumber);
+                    buffer.append(buffer_msg_line_offset,
+                                  &format!("{}:{}:{}",
+                                           loc.file.name,
+                                           cm.doctest_offset_line(loc.line),
+                                           loc.col.0 + 1),
+                                  Style::LineAndColumn);
+                    for _ in 0..max_line_num_len {
+                        buffer.prepend(buffer_msg_line_offset, " ", Style::NoStyle);
+                    }
+                } else {
+                    buffer.prepend(0,
+                                   &format!("{}:{}:{}: ",
+                                            loc.file.name,
+                                            cm.doctest_offset_line(loc.line),
+                                            loc.col.0 + 1),
+                                   Style::LineAndColumn);
                 }
-            } else {
+            } else if !self.short_message {
                 // remember where we are in the output buffer for easy reference
                 let buffer_msg_line_offset = buffer.num_lines();
 
@@ -565,109 +1061,268 @@ impl EmitterWriter {
 
                 // Then, the secondary file indicator
                 buffer.prepend(buffer_msg_line_offset + 1, "::: ", Style::LineNumber);
+                let loc = if let Some(first_line) = annotated_file.lines.first() {
+                    let col = if let Some(first_annotation) = first_line.annotations.first() {
+                        format!(":{}", first_annotation.start_col + 1)
+                    } else {
+                        "".to_string()
+                    };
+                    format!("{}:{}{}",
+                            annotated_file.file.name,
+                            cm.doctest_offset_line(first_line.line_index),
+                            col)
+                } else {
+                    annotated_file.file.name.to_string()
+                };
                 buffer.append(buffer_msg_line_offset + 1,
-                                &annotated_file.file.name,
-                                Style::LineAndColumn);
+                              &loc,
+                              Style::LineAndColumn);
                 for _ in 0..max_line_num_len {
                     buffer.prepend(buffer_msg_line_offset + 1, " ", Style::NoStyle);
                 }
             }
 
-            // Put in the spacer between the location and annotated source
-            let buffer_msg_line_offset = buffer.num_lines();
-            draw_col_separator_no_space(&mut buffer, buffer_msg_line_offset, max_line_num_len + 1);
+            if !self.short_message {
+                // Put in the spacer between the location and annotated source
+                let buffer_msg_line_offset = buffer.num_lines();
+                draw_col_separator_no_space(&mut buffer,
+                                            buffer_msg_line_offset,
+                                            max_line_num_len + 1);
 
-            // Next, output the annotate source for this file
-            for line_idx in 0..annotated_file.lines.len() {
-                self.render_source_line(&mut buffer,
-                                        annotated_file.file.clone(),
-                                        &annotated_file.lines[line_idx],
-                                        3 + max_line_num_len);
+                // Contains the vertical lines' positions for active multiline annotations
+                let mut multilines = HashMap::new();
 
-                // check to see if we need to print out or elide lines that come between
-                // this annotated line and the next one
-                if line_idx < (annotated_file.lines.len() - 1) {
-                    let line_idx_delta = annotated_file.lines[line_idx + 1].line_index -
-                                            annotated_file.lines[line_idx].line_index;
-                    if line_idx_delta > 2 {
-                        let last_buffer_line_num = buffer.num_lines();
-                        buffer.puts(last_buffer_line_num, 0, "...", Style::LineNumber);
-                    } else if line_idx_delta == 2 {
-                        let unannotated_line = annotated_file.file
-                            .get_line(annotated_file.lines[line_idx].line_index)
-                            .unwrap_or("");
+                // Next, output the annotate source for this file
+                for line_idx in 0..annotated_file.lines.len() {
+                    let previous_buffer_line = buffer.num_lines();
 
-                        let last_buffer_line_num = buffer.num_lines();
+                    let width_offset = 3 + max_line_num_len;
+                    let code_offset = if annotated_file.multiline_depth == 0 {
+                        width_offset
+                    } else {
+                        width_offset + annotated_file.multiline_depth + 1
+                    };
 
-                        buffer.puts(last_buffer_line_num,
-                                    0,
-                                    &(annotated_file.lines[line_idx + 1].line_index - 1)
-                                        .to_string(),
-                                    Style::LineNumber);
-                        draw_col_separator(&mut buffer, last_buffer_line_num, 1 + max_line_num_len);
-                        buffer.puts(last_buffer_line_num,
-                                    3 + max_line_num_len,
-                                    &unannotated_line,
-                                    Style::Quotation);
+                    let depths = self.render_source_line(&mut buffer,
+                                                         annotated_file.file.clone(),
+                                                         &annotated_file.lines[line_idx],
+                                                         width_offset,
+                                                         code_offset);
+
+                    let mut to_add = HashMap::new();
+
+                    for (depth, style) in depths {
+                        if multilines.get(&depth).is_some() {
+                            multilines.remove(&depth);
+                        } else {
+                            to_add.insert(depth, style);
+                        }
                     }
+
+                    // Set the multiline annotation vertical lines to the left of
+                    // the code in this line.
+                    for (depth, style) in &multilines {
+                        for line in previous_buffer_line..buffer.num_lines() {
+                            draw_multiline_line(&mut buffer,
+                                                line,
+                                                width_offset,
+                                                *depth,
+                                                *style);
+                        }
+                    }
+                    // check to see if we need to print out or elide lines that come between
+                    // this annotated line and the next one.
+                    if line_idx < (annotated_file.lines.len() - 1) {
+                        let line_idx_delta = annotated_file.lines[line_idx + 1].line_index -
+                                             annotated_file.lines[line_idx].line_index;
+                        if line_idx_delta > 2 {
+                            let last_buffer_line_num = buffer.num_lines();
+                            buffer.puts(last_buffer_line_num, 0, "...", Style::LineNumber);
+
+                            // Set the multiline annotation vertical lines on `...` bridging line.
+                            for (depth, style) in &multilines {
+                                draw_multiline_line(&mut buffer,
+                                                    last_buffer_line_num,
+                                                    width_offset,
+                                                    *depth,
+                                                    *style);
+                            }
+                        } else if line_idx_delta == 2 {
+                            let unannotated_line = annotated_file.file
+                                .get_line(annotated_file.lines[line_idx].line_index)
+                                .unwrap_or_else(|| Cow::from(""));
+
+                            let last_buffer_line_num = buffer.num_lines();
+
+                            buffer.puts(last_buffer_line_num,
+                                        0,
+                                        &self.maybe_anonymized(annotated_file.lines[line_idx + 1]
+                                                                             .line_index - 1),
+                                        Style::LineNumber);
+                            draw_col_separator(&mut buffer,
+                                               last_buffer_line_num,
+                                               1 + max_line_num_len);
+                            buffer.puts(last_buffer_line_num,
+                                        code_offset,
+                                        &unannotated_line,
+                                        Style::Quotation);
+
+                            for (depth, style) in &multilines {
+                                draw_multiline_line(&mut buffer,
+                                                    last_buffer_line_num,
+                                                    width_offset,
+                                                    *depth,
+                                                    *style);
+                            }
+                        }
+                    }
+
+                    multilines.extend(&to_add);
                 }
             }
         }
 
         // final step: take our styled buffer, render it, then output it
-        emit_to_destination(&buffer.render(), level, &mut self.dst)?;
+        emit_to_destination(&buffer.render(), level, &mut self.dst, self.short_message)?;
 
         Ok(())
+
     }
+
     fn emit_suggestion_default(&mut self,
                                suggestion: &CodeSuggestion,
                                level: &Level,
-                               msg: &str,
                                max_line_num_len: usize)
                                -> io::Result<()> {
-        use std::borrow::Borrow;
-
-        let primary_span = suggestion.msp.primary_span().unwrap();
         if let Some(ref cm) = self.cm {
             let mut buffer = StyledBuffer::new();
 
-            buffer.append(0, &level.to_string(), Style::Level(level.clone()));
-            buffer.append(0, ": ", Style::HeaderMsg);
-            buffer.append(0, msg, Style::HeaderMsg);
-
-            let lines = cm.span_to_lines(primary_span).unwrap();
-
-            assert!(!lines.lines.is_empty());
-
-            let complete = suggestion.splice_lines(cm.borrow());
-
-            // print the suggestion without any line numbers, but leave
-            // space for them. This helps with lining up with previous
-            // snippets from the actual error being reported.
-            let mut lines = complete.lines();
-            let mut row_num = 1;
-            for line in lines.by_ref().take(MAX_HIGHLIGHT_LINES) {
-                draw_col_separator(&mut buffer, row_num, max_line_num_len + 1);
-                buffer.append(row_num, line, Style::NoStyle);
-                row_num += 1;
+            // Render the suggestion message
+            let level_str = level.to_string();
+            if !level_str.is_empty() {
+                buffer.append(0, &level_str, Style::Level(level.clone()));
+                buffer.append(0, ": ", Style::HeaderMsg);
             }
+            self.msg_to_buffer(&mut buffer,
+                               &[(suggestion.msg.to_owned(), Style::NoStyle)],
+                               max_line_num_len,
+                               "suggestion",
+                               Some(Style::HeaderMsg));
 
-            // if we elided some lines, add an ellipsis
-            if let Some(_) = lines.next() {
-                buffer.append(row_num, "...", Style::NoStyle);
+            // Render the replacements for each suggestion
+            let suggestions = suggestion.splice_lines(&**cm);
+
+            let mut row_num = 2;
+            for &(ref complete, ref parts) in suggestions.iter().take(MAX_SUGGESTIONS) {
+                // Only show underline if the suggestion spans a single line and doesn't cover the
+                // entirety of the code output. If you have multiple replacements in the same line
+                // of code, show the underline.
+                let show_underline = !(parts.len() == 1
+                    && parts[0].snippet.trim() == complete.trim())
+                    && complete.lines().count() == 1;
+
+                let lines = cm.span_to_lines(parts[0].span).unwrap();
+
+                assert!(!lines.lines.is_empty());
+
+                let line_start = cm.lookup_char_pos(parts[0].span.lo()).line;
+                draw_col_separator_no_space(&mut buffer, 1, max_line_num_len + 1);
+                let mut line_pos = 0;
+                let mut lines = complete.lines();
+                for line in lines.by_ref().take(MAX_HIGHLIGHT_LINES) {
+                    // Print the span column to avoid confusion
+                    buffer.puts(row_num,
+                                0,
+                                &self.maybe_anonymized(line_start + line_pos),
+                                Style::LineNumber);
+                    // print the suggestion
+                    draw_col_separator(&mut buffer, row_num, max_line_num_len + 1);
+                    buffer.append(row_num, line, Style::NoStyle);
+                    line_pos += 1;
+                    row_num += 1;
+                }
+
+                // This offset and the ones below need to be signed to account for replacement code
+                // that is shorter than the original code.
+                let mut offset: isize = 0;
+                // Only show an underline in the suggestions if the suggestion is not the
+                // entirety of the code being shown and the displayed code is not multiline.
+                if show_underline {
+                    draw_col_separator(&mut buffer, row_num, max_line_num_len + 1);
+                    for part in parts {
+                        let span_start_pos = cm.lookup_char_pos(part.span.lo()).col_display;
+                        let span_end_pos = cm.lookup_char_pos(part.span.hi()).col_display;
+
+                        // Do not underline the leading...
+                        let start = part.snippet.len()
+                            .saturating_sub(part.snippet.trim_left().len());
+                        // ...or trailing spaces. Account for substitutions containing unicode
+                        // characters.
+                        let sub_len = part.snippet.trim().chars().fold(0, |acc, ch| {
+                            acc + unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0)
+                        });
+
+                        let underline_start = (span_start_pos + start) as isize + offset;
+                        let underline_end = (span_start_pos + start + sub_len) as isize + offset;
+                        for p in underline_start..underline_end {
+                            buffer.putc(row_num,
+                                        max_line_num_len + 3 + p as usize,
+                                        '^',
+                                        Style::UnderlinePrimary);
+                        }
+                        // underline removals too
+                        if underline_start == underline_end {
+                            for p in underline_start-1..underline_start+1 {
+                                buffer.putc(row_num,
+                                            max_line_num_len + 3 + p as usize,
+                                            '-',
+                                            Style::UnderlineSecondary);
+                            }
+                        }
+
+                        // length of the code after substitution
+                        let full_sub_len = part.snippet.chars().fold(0, |acc, ch| {
+                            acc + unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0) as isize
+                        });
+
+                        // length of the code to be substituted
+                        let snippet_len = span_end_pos as isize - span_start_pos as isize;
+                        // For multiple substitutions, use the position *after* the previous
+                        // substitutions have happened.
+                        offset += full_sub_len - snippet_len;
+                    }
+                    row_num += 1;
+                }
+
+                // if we elided some lines, add an ellipsis
+                if let Some(_) = lines.next() {
+                    buffer.puts(row_num, max_line_num_len - 1, "...", Style::LineNumber);
+                } else if !show_underline {
+                    draw_col_separator_no_space(&mut buffer, row_num, max_line_num_len + 1);
+                    row_num += 1;
+                }
             }
-            emit_to_destination(&buffer.render(), level, &mut self.dst)?;
+            if suggestions.len() > MAX_SUGGESTIONS {
+                let msg = format!("and {} other candidates", suggestions.len() - MAX_SUGGESTIONS);
+                buffer.puts(row_num, 0, &msg, Style::NoStyle);
+            }
+            emit_to_destination(&buffer.render(), level, &mut self.dst, self.short_message)?;
         }
         Ok(())
     }
+
     fn emit_messages_default(&mut self,
                              level: &Level,
-                             message: &String,
-                             code: &Option<String>,
+                             message: &[(String, Style)],
+                             code: &Option<DiagnosticId>,
                              span: &MultiSpan,
-                             children: &Vec<SubDiagnostic>) {
-        let max_line_num = self.get_max_line_num(span, children);
-        let max_line_num_len = max_line_num.to_string().len();
+                             children: &[SubDiagnostic],
+                             suggestions: &[CodeSuggestion]) {
+        let max_line_num_len = if self.ui_testing {
+            ANONYMIZED_LINE_NUM.len()
+        } else {
+            self.get_max_line_num(span, children).to_string().len()
+        };
 
         match self.emit_message_default(span,
                                         message,
@@ -678,55 +1333,49 @@ impl EmitterWriter {
             Ok(()) => {
                 if !children.is_empty() {
                     let mut buffer = StyledBuffer::new();
-                    draw_col_separator_no_space(&mut buffer, 0, max_line_num_len + 1);
-                    match emit_to_destination(&buffer.render(), level, &mut self.dst) {
+                    if !self.short_message {
+                        draw_col_separator_no_space(&mut buffer, 0, max_line_num_len + 1);
+                    }
+                    match emit_to_destination(&buffer.render(), level, &mut self.dst,
+                                              self.short_message) {
                         Ok(()) => (),
                         Err(e) => panic!("failed to emit error: {}", e)
                     }
                 }
-                for child in children {
-                    match child.render_span {
-                        Some(FullSpan(ref msp)) => {
-                            match self.emit_message_default(msp,
-                                                            &child.message,
-                                                            &None,
-                                                            &child.level,
-                                                            max_line_num_len,
-                                                            true) {
-                                Err(e) => panic!("failed to emit error: {}", e),
-                                _ => ()
-                            }
-                        },
-                        Some(Suggestion(ref cs)) => {
-                            match self.emit_suggestion_default(cs,
-                                                               &child.level,
-                                                               &child.message,
-                                                               max_line_num_len) {
-                                Err(e) => panic!("failed to emit error: {}", e),
-                                _ => ()
-                            }
-                        },
-                        None => {
-                            match self.emit_message_default(&child.span,
-                                                            &child.message,
-                                                            &None,
-                                                            &child.level,
-                                                            max_line_num_len,
-                                                            true) {
-                                Err(e) => panic!("failed to emit error: {}", e),
-                                _ => ()
-                            }
+                if !self.short_message {
+                    for child in children {
+                        let span = child.render_span.as_ref().unwrap_or(&child.span);
+                        match self.emit_message_default(&span,
+                                                        &child.styled_message(),
+                                                        &None,
+                                                        &child.level,
+                                                        max_line_num_len,
+                                                        true) {
+                            Err(e) => panic!("failed to emit error: {}", e),
+                            _ => ()
+                        }
+                    }
+                    for sugg in suggestions {
+                        match self.emit_suggestion_default(sugg,
+                                                           &Level::Help,
+                                                           max_line_num_len) {
+                            Err(e) => panic!("failed to emit error: {}", e),
+                            _ => ()
                         }
                     }
                 }
             }
-            Err(e) => panic!("failed to emit error: {}", e)
-        }
-        match write!(&mut self.dst, "\n") {
             Err(e) => panic!("failed to emit error: {}", e),
-            _ => match self.dst.flush() {
-                Err(e) => panic!("failed to emit error: {}", e),
-                _ => ()
+        }
+
+        let mut dst = self.dst.writable();
+        match write!(dst, "\n") {
+            Err(e) => panic!("failed to emit error: {}", e),
+            _ => {
+                match dst.flush() {
+                    Err(e) => panic!("failed to emit error: {}", e),
+                    _ => (),
+                }
             }
         }
     }
@@ -737,22 +1386,57 @@ fn draw_col_separator(buffer: &mut StyledBuffer, line: usize, col: usize) {
 }
 
 fn draw_col_separator_no_space(buffer: &mut StyledBuffer, line: usize, col: usize) {
-    buffer.puts(line, col, "|", Style::LineNumber);
+    draw_col_separator_no_space_with_style(buffer, line, col, Style::LineNumber);
+}
+
+fn draw_col_separator_no_space_with_style(buffer: &mut StyledBuffer,
+                                          line: usize,
+                                          col: usize,
+                                          style: Style) {
+    buffer.putc(line, col, '|', style);
+}
+
+fn draw_range(buffer: &mut StyledBuffer, symbol: char, line: usize,
+              col_from: usize, col_to: usize, style: Style) {
+    for col in col_from..col_to {
+        buffer.putc(line, col, symbol, style);
+    }
 }
 
 fn draw_note_separator(buffer: &mut StyledBuffer, line: usize, col: usize) {
     buffer.puts(line, col, "= ", Style::LineNumber);
 }
 
-fn overlaps(a1: &Annotation, a2: &Annotation) -> bool {
-    (a2.start_col..a2.end_col).contains(a1.start_col) ||
-    (a1.start_col..a1.end_col).contains(a2.start_col)
+fn draw_multiline_line(buffer: &mut StyledBuffer,
+                       line: usize,
+                       offset: usize,
+                       depth: usize,
+                       style: Style)
+{
+    buffer.putc(line, offset + depth - 1, '|', style);
 }
 
-fn emit_to_destination(rendered_buffer: &Vec<Vec<StyledString>>,
-        lvl: &Level,
-        dst: &mut Destination) -> io::Result<()> {
+fn num_overlap(a_start: usize, a_end: usize, b_start: usize, b_end:usize, inclusive: bool) -> bool {
+    let extra = if inclusive {
+        1
+    } else {
+        0
+    };
+    (b_start..b_end + extra).contains(&a_start) ||
+    (a_start..a_end + extra).contains(&b_start)
+}
+fn overlaps(a1: &Annotation, a2: &Annotation, padding: usize) -> bool {
+    num_overlap(a1.start_col, a1.end_col + padding, a2.start_col, a2.end_col, false)
+}
+
+fn emit_to_destination(rendered_buffer: &[Vec<StyledString>],
+                       lvl: &Level,
+                       dst: &mut Destination,
+                       short_message: bool)
+                       -> io::Result<()> {
     use lock;
+
+    let mut dst = dst.writable();
 
     // In order to prevent error message interleaving, where multiple error lines get intermixed
     // when multiple compiler processes error simultaneously, we emit errors with additional
@@ -767,197 +1451,151 @@ fn emit_to_destination(rendered_buffer: &Vec<Vec<StyledString>>,
     // same buffering approach.  Instead, we use a global Windows mutex, which we acquire long
     // enough to output the full error message, then we release.
     let _buffer_lock = lock::acquire_global_lock("rustc_errors");
-    for line in rendered_buffer {
+    for (pos, line) in rendered_buffer.iter().enumerate() {
         for part in line {
             dst.apply_style(lvl.clone(), part.style)?;
             write!(dst, "{}", part.text)?;
-            dst.reset_attrs()?;
+            dst.reset()?;
         }
-        write!(dst, "\n")?;
+        if !short_message && (!lvl.is_failure_note() || pos != rendered_buffer.len() - 1) {
+            write!(dst, "\n")?;
+        }
     }
     dst.flush()?;
     Ok(())
 }
 
-#[cfg(unix)]
-fn stderr_isatty() -> bool {
-    use libc;
-    unsafe { libc::isatty(libc::STDERR_FILENO) != 0 }
-}
-#[cfg(windows)]
-fn stderr_isatty() -> bool {
-    type DWORD = u32;
-    type BOOL = i32;
-    type HANDLE = *mut u8;
-    const STD_ERROR_HANDLE: DWORD = -12i32 as DWORD;
-    extern "system" {
-        fn GetStdHandle(which: DWORD) -> HANDLE;
-        fn GetConsoleMode(hConsoleHandle: HANDLE,
-                          lpMode: *mut DWORD) -> BOOL;
-    }
-    unsafe {
-        let handle = GetStdHandle(STD_ERROR_HANDLE);
-        let mut out = 0;
-        GetConsoleMode(handle, &mut out) != 0
-    }
-}
-
-pub type BufferedStderr = term::Terminal<Output = BufferedWriter> + Send;
-
 pub enum Destination {
-    Terminal(Box<term::StderrTerminal>),
-    BufferedTerminal(Box<BufferedStderr>),
-    Raw(Box<Write + Send>),
+    Terminal(StandardStream),
+    Buffered(BufferWriter),
+    Raw(Box<dyn Write + Send>),
 }
 
-/// Buffered writer gives us a way on Unix to buffer up an entire error message before we output
-/// it.  This helps to prevent interleaving of multiple error messages when multiple compiler
-/// processes error simultaneously
-pub struct BufferedWriter {
-    buffer: Vec<u8>,
-}
-
-impl BufferedWriter {
-    // note: we use _new because the conditional compilation at its use site may make this
-    // this function unused on some platforms
-    fn _new() -> BufferedWriter {
-        BufferedWriter {
-            buffer: vec![]
-        }
-    }
-}
-
-impl Write for BufferedWriter {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        for b in buf {
-            self.buffer.push(*b);
-        }
-        Ok(buf.len())
-    }
-    fn flush(&mut self) -> io::Result<()> {
-        let mut stderr = io::stderr();
-        let result = (|| {
-            stderr.write_all(&self.buffer)?;
-            stderr.flush()
-        })();
-        self.buffer.clear();
-        result
-    }
+pub enum WritableDst<'a> {
+    Terminal(&'a mut StandardStream),
+    Buffered(&'a mut BufferWriter, Buffer),
+    Raw(&'a mut Box<dyn Write + Send>),
 }
 
 impl Destination {
-    #[cfg(not(windows))]
-    /// When not on Windows, prefer the buffered terminal so that we can buffer an entire error
-    /// to be emitted at one time.
-    fn from_stderr() -> Destination {
-        let stderr: Option<Box<BufferedStderr>>  =
-            term::TerminfoTerminal::new(BufferedWriter::_new())
-                .map(|t| Box::new(t) as Box<BufferedStderr>);
-
-        match stderr {
-            Some(t) => BufferedTerminal(t),
-            None    => Raw(Box::new(io::stderr())),
+    fn from_stderr(color: ColorConfig) -> Destination {
+        let choice = color.to_color_choice();
+        // On Windows we'll be performing global synchronization on the entire
+        // system for emitting rustc errors, so there's no need to buffer
+        // anything.
+        //
+        // On non-Windows we rely on the atomicity of `write` to ensure errors
+        // don't get all jumbled up.
+        if cfg!(windows) {
+            Terminal(StandardStream::stderr(choice))
+        } else {
+            Buffered(BufferWriter::stderr(choice))
         }
     }
 
-    #[cfg(windows)]
-    /// Return a normal, unbuffered terminal when on Windows.
-    fn from_stderr() -> Destination {
-        let stderr: Option<Box<term::StderrTerminal>> =
-            term::TerminfoTerminal::new(io::stderr())
-                .map(|t| Box::new(t) as Box<term::StderrTerminal>)
-                .or_else(|| term::WinConsole::new(io::stderr()).ok()
-                    .map(|t| Box::new(t) as Box<term::StderrTerminal>));
-
-        match stderr {
-            Some(t) => Terminal(t),
-            None    => Raw(Box::new(io::stderr())),
-        }
-    }
-
-    fn apply_style(&mut self,
-                   lvl: Level,
-                   style: Style)
-                   -> io::Result<()> {
-        match style {
-            Style::FileNameStyle | Style::LineAndColumn => {}
-            Style::LineNumber => {
-                try!(self.start_attr(term::Attr::Bold));
-                if cfg!(windows) {
-                    try!(self.start_attr(term::Attr::ForegroundColor(term::color::BRIGHT_CYAN)));
-                } else {
-                    try!(self.start_attr(term::Attr::ForegroundColor(term::color::BRIGHT_BLUE)));
-                }
-            }
-            Style::ErrorCode => {
-                try!(self.start_attr(term::Attr::Bold));
-                try!(self.start_attr(term::Attr::ForegroundColor(term::color::BRIGHT_MAGENTA)));
-            }
-            Style::Quotation => {}
-            Style::OldSchoolNote => {
-                try!(self.start_attr(term::Attr::Bold));
-                try!(self.start_attr(term::Attr::ForegroundColor(term::color::BRIGHT_GREEN)));
-            }
-            Style::OldSchoolNoteText | Style::HeaderMsg => {
-                try!(self.start_attr(term::Attr::Bold));
-                if cfg!(windows) {
-                    try!(self.start_attr(term::Attr::ForegroundColor(term::color::BRIGHT_WHITE)));
-                }
-            }
-            Style::UnderlinePrimary | Style::LabelPrimary => {
-                try!(self.start_attr(term::Attr::Bold));
-                try!(self.start_attr(term::Attr::ForegroundColor(lvl.color())));
-            }
-            Style::UnderlineSecondary |
-            Style::LabelSecondary => {
-                try!(self.start_attr(term::Attr::Bold));
-                if cfg!(windows) {
-                    try!(self.start_attr(term::Attr::ForegroundColor(term::color::BRIGHT_CYAN)));
-                } else {
-                    try!(self.start_attr(term::Attr::ForegroundColor(term::color::BRIGHT_BLUE)));
-                }
-            }
-            Style::NoStyle => {}
-            Style::Level(l) => {
-                try!(self.start_attr(term::Attr::Bold));
-                try!(self.start_attr(term::Attr::ForegroundColor(l.color())));
-            }
-        }
-        Ok(())
-    }
-
-    fn start_attr(&mut self, attr: term::Attr) -> io::Result<()> {
+    fn writable<'a>(&'a mut self) -> WritableDst<'a> {
         match *self {
-            Terminal(ref mut t) => { t.attr(attr)?; }
-            BufferedTerminal(ref mut t) => { t.attr(attr)?; }
-            Raw(_) => { }
+            Destination::Terminal(ref mut t) => WritableDst::Terminal(t),
+            Destination::Buffered(ref mut t) => {
+                let buf = t.buffer();
+                WritableDst::Buffered(t, buf)
+            }
+            Destination::Raw(ref mut t) => WritableDst::Raw(t),
         }
-        Ok(())
-    }
-
-    fn reset_attrs(&mut self) -> io::Result<()> {
-        match *self {
-            Terminal(ref mut t) => { t.reset()?; }
-            BufferedTerminal(ref mut t) => { t.reset()?; }
-            Raw(_) => { }
-        }
-        Ok(())
     }
 }
 
-impl Write for Destination {
-    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+impl<'a> WritableDst<'a> {
+    fn apply_style(&mut self, lvl: Level, style: Style) -> io::Result<()> {
+        let mut spec = ColorSpec::new();
+        match style {
+            Style::LineAndColumn => {}
+            Style::LineNumber => {
+                spec.set_bold(true);
+                spec.set_intense(true);
+                if cfg!(windows) {
+                    spec.set_fg(Some(Color::Cyan));
+                } else {
+                    spec.set_fg(Some(Color::Blue));
+                }
+            }
+            Style::Quotation => {}
+            Style::OldSchoolNoteText | Style::MainHeaderMsg => {
+                spec.set_bold(true);
+                if cfg!(windows) {
+                    spec.set_intense(true)
+                        .set_fg(Some(Color::White));
+                }
+            }
+            Style::UnderlinePrimary | Style::LabelPrimary => {
+                spec = lvl.color();
+                spec.set_bold(true);
+            }
+            Style::UnderlineSecondary |
+            Style::LabelSecondary => {
+                spec.set_bold(true)
+                    .set_intense(true);
+                if cfg!(windows) {
+                    spec.set_fg(Some(Color::Cyan));
+                } else {
+                    spec.set_fg(Some(Color::Blue));
+                }
+            }
+            Style::HeaderMsg |
+            Style::NoStyle => {}
+            Style::Level(lvl) => {
+                spec = lvl.color();
+                spec.set_bold(true);
+            }
+            Style::Highlight => {
+                spec.set_bold(true);
+            }
+        }
+        self.set_color(&spec)
+    }
+
+    fn set_color(&mut self, color: &ColorSpec) -> io::Result<()> {
         match *self {
-            Terminal(ref mut t) => t.write(bytes),
-            BufferedTerminal(ref mut t) => t.write(bytes),
-            Raw(ref mut w) => w.write(bytes),
+            WritableDst::Terminal(ref mut t) => t.set_color(color),
+            WritableDst::Buffered(_, ref mut t) => t.set_color(color),
+            WritableDst::Raw(_) => Ok(())
         }
     }
+
+    fn reset(&mut self) -> io::Result<()> {
+        match *self {
+            WritableDst::Terminal(ref mut t) => t.reset(),
+            WritableDst::Buffered(_, ref mut t) => t.reset(),
+            WritableDst::Raw(_) => Ok(()),
+        }
+    }
+}
+
+impl<'a> Write for WritableDst<'a> {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        match *self {
+            WritableDst::Terminal(ref mut t) => t.write(bytes),
+            WritableDst::Buffered(_, ref mut buf) => buf.write(bytes),
+            WritableDst::Raw(ref mut w) => w.write(bytes),
+        }
+    }
+
     fn flush(&mut self) -> io::Result<()> {
         match *self {
-            Terminal(ref mut t) => t.flush(),
-            BufferedTerminal(ref mut t) => t.flush(),
-            Raw(ref mut w) => w.flush(),
+            WritableDst::Terminal(ref mut t) => t.flush(),
+            WritableDst::Buffered(_, ref mut buf) => buf.flush(),
+            WritableDst::Raw(ref mut w) => w.flush(),
+        }
+    }
+}
+
+impl<'a> Drop for WritableDst<'a> {
+    fn drop(&mut self) {
+        match *self {
+            WritableDst::Buffered(ref mut dst, ref mut buf) => {
+                drop(dst.print(buf));
+            }
+            _ => {}
         }
     }
 }

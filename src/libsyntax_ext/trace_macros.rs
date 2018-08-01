@@ -11,16 +11,16 @@
 use syntax::ext::base::ExtCtxt;
 use syntax::ext::base;
 use syntax::feature_gate;
-use syntax::parse::token::keywords;
+use syntax::symbol::keywords;
 use syntax_pos::Span;
 use syntax::tokenstream::TokenTree;
 
 pub fn expand_trace_macros(cx: &mut ExtCtxt,
                            sp: Span,
                            tt: &[TokenTree])
-                           -> Box<base::MacResult + 'static> {
+                           -> Box<dyn base::MacResult + 'static> {
     if !cx.ecfg.enable_trace_macros() {
-        feature_gate::emit_feature_err(&cx.parse_sess.span_diagnostic,
+        feature_gate::emit_feature_err(&cx.parse_sess,
                                        "trace_macros",
                                        sp,
                                        feature_gate::GateIssue::Language,

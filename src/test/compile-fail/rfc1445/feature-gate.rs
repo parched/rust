@@ -14,8 +14,9 @@
 
 // revisions: with_gate no_gate
 
-#![allow(dead_code)]
-#![deny(future_incompatible)]
+// gate-test-structural_match
+
+#![allow(unused)]
 #![feature(rustc_attrs)]
 #![cfg_attr(with_gate, feature(structural_match))]
 

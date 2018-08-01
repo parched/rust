@@ -11,8 +11,10 @@
 use cmp::Ordering;
 use libc;
 use time::Duration;
+use core::hash::{Hash, Hasher};
 
 pub use self::inner::{Instant, SystemTime, UNIX_EPOCH};
+use convert::TryInto;
 
 const NSEC_PER_SEC: u64 = 1_000_000_000;
 
@@ -41,8 +43,12 @@ impl Timespec {
     }
 
     fn add_duration(&self, other: &Duration) -> Timespec {
-        let secs = (self.t.tv_sec as i64).checked_add(other.as_secs() as i64);
-        let mut secs = secs.expect("overflow when adding duration to time");
+        let mut secs = other
+            .as_secs()
+            .try_into() // <- target type would be `libc::time_t`
+            .ok()
+            .and_then(|secs| self.t.tv_sec.checked_add(secs))
+            .expect("overflow when adding duration to time");
 
         // Nano calculations can't overflow because nanos are <1B which fit
         // in a u32.
@@ -54,16 +60,19 @@ impl Timespec {
         }
         Timespec {
             t: libc::timespec {
-                tv_sec: secs as libc::time_t,
-                tv_nsec: nsec as libc::c_long,
+                tv_sec: secs,
+                tv_nsec: nsec as _,
             },
         }
     }
 
     fn sub_duration(&self, other: &Duration) -> Timespec {
-        let secs = (self.t.tv_sec as i64).checked_sub(other.as_secs() as i64);
-        let mut secs = secs.expect("overflow when subtracting duration \
-                                    from time");
+        let mut secs = other
+            .as_secs()
+            .try_into() // <- target type would be `libc::time_t`
+            .ok()
+            .and_then(|secs| self.t.tv_sec.checked_sub(secs))
+            .expect("overflow when subtracting duration from time");
 
         // Similar to above, nanos can't overflow.
         let mut nsec = self.t.tv_nsec as i32 - other.subsec_nanos() as i32;
@@ -74,8 +83,8 @@ impl Timespec {
         }
         Timespec {
             t: libc::timespec {
-                tv_sec: secs as libc::time_t,
-                tv_nsec: nsec as libc::c_long,
+                tv_sec: secs,
+                tv_nsec: nsec as _,
             },
         }
     }
@@ -103,6 +112,13 @@ impl Ord for Timespec {
     }
 }
 
+impl Hash for Timespec {
+    fn hash<H : Hasher>(&self, state: &mut H) {
+        self.t.tv_sec.hash(state);
+        self.t.tv_nsec.hash(state);
+    }
+}
+
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 mod inner {
     use fmt;
@@ -115,12 +131,12 @@ mod inner {
     use super::NSEC_PER_SEC;
     use super::Timespec;
 
-    #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
+    #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
     pub struct Instant {
         t: u64
     }
 
-    #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
+    #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
     pub struct SystemTime {
         t: Timespec,
     }
@@ -157,7 +173,7 @@ mod inner {
         pub fn sub_duration(&self, other: &Duration) -> Instant {
             Instant {
                 t: self.t.checked_sub(dur2intervals(other))
-                       .expect("overflow when adding duration to instant"),
+                       .expect("overflow when subtracting duration from instant"),
             }
         }
     }
@@ -247,12 +263,12 @@ mod inner {
 
     use super::Timespec;
 
-    #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
+    #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
     pub struct Instant {
         t: Timespec,
     }
 
-    #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
+    #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
     pub struct SystemTime {
         t: Timespec,
     }
@@ -273,7 +289,7 @@ mod inner {
 
         pub fn sub_instant(&self, other: &Instant) -> Duration {
             self.t.sub_timespec(&other.t).unwrap_or_else(|_| {
-                panic!("other was less than the current instant")
+                panic!("specified instant was later than self")
             })
         }
 
@@ -329,9 +345,9 @@ mod inner {
         }
     }
 
-    #[cfg(not(target_os = "dragonfly"))]
+    #[cfg(not(any(target_os = "dragonfly", target_os = "hermit")))]
     pub type clock_t = libc::c_int;
-    #[cfg(target_os = "dragonfly")]
+    #[cfg(any(target_os = "dragonfly", target_os = "hermit"))]
     pub type clock_t = libc::c_ulong;
 
     fn now(clock: clock_t) -> Timespec {

@@ -11,45 +11,49 @@
 use std::default::Default;
 use std::fs::File;
 use std::io::prelude::*;
-use std::io;
 use std::path::{PathBuf, Path};
+use std::cell::RefCell;
 
+use errors;
 use getopts;
 use testing;
 use rustc::session::search_paths::SearchPaths;
-use rustc::session::config::Externs;
+use rustc::session::config::{Externs, CodegenOptions};
+use syntax::codemap::DUMMY_SP;
+use syntax::feature_gate::UnstableFeatures;
+use syntax::edition::Edition;
 
-use externalfiles::ExternalHtml;
+use externalfiles::{ExternalHtml, LoadStringError, load_string};
 
-use html::render::reset_ids;
 use html::escape::Escape;
 use html::markdown;
-use html::markdown::{Markdown, MarkdownWithToc, find_testable_code};
+use html::markdown::{ErrorCodes, IdMap, Markdown, MarkdownWithToc, find_testable_code};
 use test::{TestOptions, Collector};
 
-/// Separate any lines at the start of the file that begin with `%`.
+/// Separate any lines at the start of the file that begin with `# ` or `%`.
 fn extract_leading_metadata<'a>(s: &'a str) -> (Vec<&'a str>, &'a str) {
     let mut metadata = Vec::new();
     let mut count = 0;
+
     for line in s.lines() {
-        if line.starts_with("%") {
-            // remove %<whitespace>
+        if line.starts_with("# ") || line.starts_with("%") {
+            // trim the whitespace after the symbol
             metadata.push(line[1..].trim_left());
             count += line.len() + 1;
         } else {
             return (metadata, &s[count..]);
         }
     }
-    // if we're here, then all lines were metadata % lines.
+
+    // if we're here, then all lines were metadata `# ` or `%` lines.
     (metadata, "")
 }
 
 /// Render `input` (e.g. "foo.md") into an HTML file in `output`
 /// (e.g. output = "bar" => "bar/foo.html").
-pub fn render(input: &str, mut output: PathBuf, matches: &getopts::Matches,
-              external_html: &ExternalHtml, include_toc: bool) -> isize {
-    let input_p = Path::new(input);
-    output.push(input_p.file_stem().unwrap());
+pub fn render(input: &Path, mut output: PathBuf, matches: &getopts::Matches,
+              external_html: &ExternalHtml, include_toc: bool, diag: &errors::Handler) -> isize {
+    output.push(input.file_stem().unwrap());
     output.set_extension("html");
 
     let mut css = String::new();
@@ -58,18 +62,19 @@ pub fn render(input: &str, mut output: PathBuf, matches: &getopts::Matches,
         css.push_str(&s)
     }
 
-    let input_str = load_or_return!(input, 1, 2);
-    let playground = matches.opt_str("markdown-playground-url");
-    if playground.is_some() {
-        markdown::PLAYGROUND_KRATE.with(|s| { *s.borrow_mut() = Some(None); });
+    let input_str = match load_string(input, diag) {
+        Ok(s) => s,
+        Err(LoadStringError::ReadFail) => return 1,
+        Err(LoadStringError::BadUtf8) => return 2,
+    };
+    if let Some(playground) = matches.opt_str("markdown-playground-url").or(
+                              matches.opt_str("playground-url")) {
+        markdown::PLAYGROUND.with(|s| { *s.borrow_mut() = Some((None, playground)); });
     }
-    let playground = playground.unwrap_or("".to_string());
 
     let mut out = match File::create(&output) {
         Err(e) => {
-            let _ = writeln!(&mut io::stderr(),
-                             "error opening `{}` for writing: {}",
-                             output.display(), e);
+            diag.struct_err(&format!("{}: {}", output.display(), e)).emit();
             return 4;
         }
         Ok(f) => f
@@ -77,18 +82,17 @@ pub fn render(input: &str, mut output: PathBuf, matches: &getopts::Matches,
 
     let (metadata, text) = extract_leading_metadata(&input_str);
     if metadata.is_empty() {
-        let _ = writeln!(&mut io::stderr(),
-                         "invalid markdown file: expecting initial line with `% ...TITLE...`");
+        diag.struct_err("invalid markdown file: no initial lines starting with `# ` or `%`").emit();
         return 5;
     }
     let title = metadata[0];
 
-    reset_ids(false);
-
-    let rendered = if include_toc {
-        format!("{}", MarkdownWithToc(text))
+    let mut ids = IdMap::new();
+    let error_codes = ErrorCodes::from(UnstableFeatures::from_environment().is_nightly_build());
+    let text = if include_toc {
+        MarkdownWithToc(text, RefCell::new(&mut ids), error_codes).to_string()
     } else {
-        format!("{}", Markdown(text))
+        Markdown(text, &[], RefCell::new(&mut ids), error_codes).to_string()
     };
 
     let err = write!(
@@ -115,9 +119,6 @@ pub fn render(input: &str, mut output: PathBuf, matches: &getopts::Matches,
     {before_content}
     <h1 class="title">{title}</h1>
     {text}
-    <script type="text/javascript">
-        window.playgroundUrl = "{playground}";
-    </script>
     {after_content}
 </body>
 </html>"#,
@@ -125,33 +126,45 @@ pub fn render(input: &str, mut output: PathBuf, matches: &getopts::Matches,
         css = css,
         in_header = external_html.in_header,
         before_content = external_html.before_content,
-        text = rendered,
+        text = text,
         after_content = external_html.after_content,
-        playground = playground,
-        );
+    );
 
     match err {
         Err(e) => {
-            let _ = writeln!(&mut io::stderr(),
-                             "error writing to `{}`: {}",
-                             output.display(), e);
+            diag.struct_err(&format!("cannot write to `{}`: {}", output.display(), e)).emit();
             6
         }
-        Ok(_) => 0
+        Ok(_) => 0,
     }
 }
 
 /// Run any tests/code examples in the markdown file `input`.
 pub fn test(input: &str, cfgs: Vec<String>, libs: SearchPaths, externs: Externs,
-            mut test_args: Vec<String>) -> isize {
-    let input_str = load_or_return!(input, 1, 2);
+            mut test_args: Vec<String>, maybe_sysroot: Option<PathBuf>,
+            display_warnings: bool, linker: Option<PathBuf>, edition: Edition,
+            cg: CodegenOptions, diag: &errors::Handler) -> isize {
+    let input_str = match load_string(input, diag) {
+        Ok(s) => s,
+        Err(LoadStringError::ReadFail) => return 1,
+        Err(LoadStringError::BadUtf8) => return 2,
+    };
 
     let mut opts = TestOptions::default();
     opts.no_crate_inject = true;
-    let mut collector = Collector::new(input.to_string(), cfgs, libs, externs,
-                                       true, opts);
-    find_testable_code(&input_str, &mut collector);
+    opts.display_warnings = display_warnings;
+    let mut collector = Collector::new(input.to_owned(), cfgs, libs, cg, externs,
+                                       true, opts, maybe_sysroot, None,
+                                       Some(PathBuf::from(input)),
+                                       linker, edition);
+    collector.set_position(DUMMY_SP);
+    let codes = ErrorCodes::from(UnstableFeatures::from_environment().is_nightly_build());
+    let res = find_testable_code(&input_str, &mut collector, codes);
+    if let Err(err) = res {
+        diag.span_warn(DUMMY_SP, &err.to_string());
+    }
     test_args.insert(0, "rustdoctest".to_string());
-    testing::test_main(&test_args, collector.tests);
+    testing::test_main(&test_args, collector.tests,
+                       testing::Options::new().display_output(display_warnings));
     0
 }

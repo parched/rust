@@ -8,8 +8,6 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-// ignore-pretty
-
 #![allow(unknown_features)]
 
 struct Parser<'a, I, O> {
@@ -18,7 +16,6 @@ struct Parser<'a, I, O> {
 
 impl<'a, I: 'a, O: 'a> Parser<'a, I, O> {
     fn compose<K: 'a>(mut self, mut rhs: Parser<'a, O, K>) -> Parser<'a, I, K> {
-        // FIXME (#22405): Replace `Box::new` with `box` here when/if possible.
         Parser {
             parse: Box::new(move |x: I| {
                 match (self.parse)(x) {

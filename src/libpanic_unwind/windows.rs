@@ -12,11 +12,11 @@
 #![allow(dead_code)]
 #![cfg(windows)]
 
-use libc::{c_long, c_ulong, c_ulonglong, c_void};
+use libc::{c_long, c_ulong, c_void};
 
 pub type DWORD = c_ulong;
 pub type LONG = c_long;
-pub type ULONG_PTR = c_ulonglong;
+pub type ULONG_PTR = usize;
 pub type LPVOID = *mut c_void;
 
 pub const EXCEPTION_MAXIMUM_PARAMETERS: usize = 15;
@@ -79,18 +79,18 @@ pub enum EXCEPTION_DISPOSITION {
 pub use self::EXCEPTION_DISPOSITION::*;
 
 extern "system" {
-    #[unwind]
+    #[unwind(allowed)]
     pub fn RaiseException(dwExceptionCode: DWORD,
                           dwExceptionFlags: DWORD,
                           nNumberOfArguments: DWORD,
                           lpArguments: *const ULONG_PTR);
-    #[unwind]
+    #[unwind(allowed)]
     pub fn RtlUnwindEx(TargetFrame: LPVOID,
                        TargetIp: LPVOID,
                        ExceptionRecord: *const EXCEPTION_RECORD,
                        ReturnValue: LPVOID,
                        OriginalContext: *const CONTEXT,
                        HistoryTable: *const UNWIND_HISTORY_TABLE);
-    #[unwind]
+    #[unwind(allowed)]
     pub fn _CxxThrowException(pExceptionObject: *mut c_void, pThrowInfo: *mut u8);
 }

@@ -90,6 +90,7 @@ def print_val(lldb_val, internal_dict):
     type_kind = val.type.get_type_kind()
 
     if (type_kind == rustpp.TYPE_KIND_REGULAR_STRUCT or
+        type_kind == rustpp.TYPE_KIND_REGULAR_UNION or
         type_kind == rustpp.TYPE_KIND_EMPTY):
         return print_struct_val(val,
                                 internal_dict,
@@ -171,11 +172,12 @@ def print_val(lldb_val, internal_dict):
 #=--------------------------------------------------------------------------------------------------
 
 def print_struct_val(val, internal_dict, omit_first_field, omit_type_name, is_tuple_like):
-    '''
+    """
     Prints a struct, tuple, or tuple struct value with Rust syntax.
     Ignores any fields before field_start_index.
-    '''
-    assert val.type.get_dwarf_type_kind() == rustpp.DWARF_TYPE_CODE_STRUCT
+    """
+    assert (val.type.get_dwarf_type_kind() == rustpp.DWARF_TYPE_CODE_STRUCT or
+            val.type.get_dwarf_type_kind() == rustpp.DWARF_TYPE_CODE_UNION)
 
     if omit_type_name:
         type_name = ""
@@ -221,7 +223,7 @@ def print_struct_val(val, internal_dict, omit_first_field, omit_type_name, is_tu
                        "body": body}
 
 def print_pointer_val(val, internal_dict):
-    '''Prints a pointer value with Rust syntax'''
+    """Prints a pointer value with Rust syntax"""
     assert val.type.get_dwarf_type_kind() == rustpp.DWARF_TYPE_CODE_PTR
     sigil = "&"
     type_name = val.type.get_unqualified_type_name()
@@ -275,8 +277,8 @@ def print_std_string_val(val, internal_dict):
 #=--------------------------------------------------------------------------------------------------
 
 def print_array_of_values(array_name, data_ptr_val, length, internal_dict):
-    '''Prints a contigous memory range, interpreting it as values of the
-       pointee-type of data_ptr_val.'''
+    """Prints a contigous memory range, interpreting it as values of the
+       pointee-type of data_ptr_val."""
 
     data_ptr_type = data_ptr_val.type
     assert data_ptr_type.get_dwarf_type_kind() == rustpp.DWARF_TYPE_CODE_PTR

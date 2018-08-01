@@ -10,24 +10,39 @@
 
 use std::panic;
 
-use rustc_macro::{TokenStream, __internal};
-use syntax::ast::{self, ItemKind};
+use errors::FatalError;
+use proc_macro::{TokenStream, __internal};
+use syntax::ast::{self, ItemKind, Attribute, Mac};
+use syntax::attr::{mark_used, mark_known};
 use syntax::codemap::Span;
 use syntax::ext::base::*;
-use syntax::fold::{self, Folder};
-use errors::FatalError;
+use syntax::visit::Visitor;
 
-pub struct CustomDerive {
-    inner: fn(TokenStream) -> TokenStream,
+struct MarkAttrs<'a>(&'a [ast::Name]);
+
+impl<'a> Visitor<'a> for MarkAttrs<'a> {
+    fn visit_attribute(&mut self, attr: &Attribute) {
+        if self.0.contains(&attr.name()) {
+            mark_used(attr);
+            mark_known(attr);
+        }
+    }
+
+    fn visit_mac(&mut self, _mac: &Mac) {}
 }
 
-impl CustomDerive {
-    pub fn new(inner: fn(TokenStream) -> TokenStream) -> CustomDerive {
-        CustomDerive { inner: inner }
+pub struct ProcMacroDerive {
+    inner: fn(TokenStream) -> TokenStream,
+    attrs: Vec<ast::Name>,
+}
+
+impl ProcMacroDerive {
+    pub fn new(inner: fn(TokenStream) -> TokenStream, attrs: Vec<ast::Name>) -> ProcMacroDerive {
+        ProcMacroDerive { inner: inner, attrs: attrs }
     }
 }
 
-impl MultiItemModifier for CustomDerive {
+impl MultiItemModifier for ProcMacroDerive {
     fn expand(&self,
               ecx: &mut ExtCtxt,
               span: Span,
@@ -37,31 +52,39 @@ impl MultiItemModifier for CustomDerive {
         let item = match item {
             Annotatable::Item(item) => item,
             Annotatable::ImplItem(_) |
-            Annotatable::TraitItem(_) => {
-                ecx.span_err(span, "custom derive attributes may only be \
-                                    applied to struct/enum items");
+            Annotatable::TraitItem(_) |
+            Annotatable::ForeignItem(_) |
+            Annotatable::Stmt(_) |
+            Annotatable::Expr(_) => {
+                ecx.span_err(span, "proc-macro derives may only be \
+                                    applied to a struct, enum, or union");
                 return Vec::new()
             }
         };
         match item.node {
             ItemKind::Struct(..) |
-            ItemKind::Enum(..) => {}
+            ItemKind::Enum(..) |
+            ItemKind::Union(..) => {},
             _ => {
-                ecx.span_err(span, "custom derive attributes may only be \
-                                    applied to struct/enum items");
+                ecx.span_err(span, "proc-macro derives may only be \
+                                    applied to a struct, enum, or union");
                 return Vec::new()
             }
         }
 
-        let input = __internal::new_token_stream(item);
-        let res = __internal::set_parse_sess(&ecx.parse_sess, || {
+        // Mark attributes as known, and used.
+        MarkAttrs(&self.attrs).visit_item(&item);
+
+        let input = __internal::new_token_stream(ecx.resolver.eliminate_crate_var(item.clone()));
+        let res = __internal::set_sess(ecx, || {
             let inner = self.inner;
             panic::catch_unwind(panic::AssertUnwindSafe(|| inner(input)))
         });
-        let item = match res {
-            Ok(stream) => __internal::token_stream_items(stream),
+
+        let stream = match res {
+            Ok(stream) => stream,
             Err(e) => {
-                let msg = "custom derive attribute panicked";
+                let msg = "proc-macro derive panicked";
                 let mut err = ecx.struct_span_fatal(span, msg);
                 if let Some(s) = e.downcast_ref::<String>() {
                     err.help(&format!("message: {}", s));
@@ -71,27 +94,26 @@ impl MultiItemModifier for CustomDerive {
                 }
 
                 err.emit();
-                panic!(FatalError);
+                FatalError.raise();
             }
         };
 
-        // Right now we have no knowledge of spans at all in custom derive
-        // macros, everything is just parsed as a string. Reassign all spans to
-        // the #[derive] attribute for better errors here.
-        item.into_iter().flat_map(|item| {
-            ChangeSpan { span: span }.fold_item(item)
-        }).map(Annotatable::Item).collect()
-    }
-}
-
-struct ChangeSpan { span: Span }
-
-impl Folder for ChangeSpan {
-    fn new_span(&mut self, _sp: Span) -> Span {
-        self.span
-    }
-
-    fn fold_mac(&mut self, mac: ast::Mac) -> ast::Mac {
-        fold::noop_fold_mac(mac, self)
+        let error_count_before = ecx.parse_sess.span_diagnostic.err_count();
+        __internal::set_sess(ecx, || {
+            let msg = "proc-macro derive produced unparseable tokens";
+            match __internal::token_stream_parse_items(stream) {
+                // fail if there have been errors emitted
+                Ok(_) if ecx.parse_sess.span_diagnostic.err_count() > error_count_before => {
+                    ecx.struct_span_fatal(span, msg).emit();
+                    FatalError.raise();
+                }
+                Ok(new_items) => new_items.into_iter().map(Annotatable::Item).collect(),
+                Err(_) => {
+                    // FIXME: handle this better
+                    ecx.struct_span_fatal(span, msg).emit();
+                    FatalError.raise();
+                }
+            }
+        })
     }
 }

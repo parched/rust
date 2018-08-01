@@ -10,8 +10,8 @@
 
 // compile-flags: -Z parse-only
 
-extern {
-    f(); //~ ERROR expected one of `fn`, `pub`, `static`, or `}`, found `f`
+extern { //~ ERROR missing `fn`, `type`, or `static` for extern-item declaration
+    f();
 }
 
 fn main() {

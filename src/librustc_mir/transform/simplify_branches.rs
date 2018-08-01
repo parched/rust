@@ -10,57 +10,63 @@
 
 //! A pass that simplifies branches when their condition is known.
 
-use rustc::ty::TyCtxt;
-use rustc::middle::const_val::ConstVal;
-use rustc::mir::transform::{MirPass, MirSource, Pass};
-use rustc::mir::repr::*;
+use rustc::ty::{TyCtxt, ParamEnv};
+use rustc::mir::*;
+use transform::{MirPass, MirSource};
 
-use std::fmt;
+use std::borrow::Cow;
 
-pub struct SimplifyBranches<'a> { label: &'a str }
+pub struct SimplifyBranches { label: String }
 
-impl<'a> SimplifyBranches<'a> {
-    pub fn new(label: &'a str) -> Self {
-        SimplifyBranches { label: label }
+impl SimplifyBranches {
+    pub fn new(label: &str) -> Self {
+        SimplifyBranches { label: format!("SimplifyBranches-{}", label) }
     }
 }
 
-impl<'l, 'tcx> MirPass<'tcx> for SimplifyBranches<'l> {
-    fn run_pass<'a>(&mut self, _tcx: TyCtxt<'a, 'tcx, 'tcx>, _src: MirSource, mir: &mut Mir<'tcx>) {
+impl MirPass for SimplifyBranches {
+    fn name<'a>(&'a self) -> Cow<'a, str> {
+        Cow::Borrowed(&self.label)
+    }
+
+    fn run_pass<'a, 'tcx>(&self,
+                          tcx: TyCtxt<'a, 'tcx, 'tcx>,
+                          _src: MirSource,
+                          mir: &mut Mir<'tcx>) {
         for block in mir.basic_blocks_mut() {
             let terminator = block.terminator_mut();
             terminator.kind = match terminator.kind {
-                TerminatorKind::If { ref targets, cond: Operand::Constant(Constant {
-                    literal: Literal::Value {
-                        value: ConstVal::Bool(cond)
-                    }, ..
-                }) } => {
-                    if cond {
-                        TerminatorKind::Goto { target: targets.0 }
+                TerminatorKind::SwitchInt {
+                    discr: Operand::Constant(ref c), switch_ty, ref values, ref targets, ..
+                } => {
+                    let switch_ty = ParamEnv::empty().and(switch_ty);
+                    if let Some(constint) = c.literal.assert_bits(tcx, switch_ty) {
+                        let (otherwise, targets) = targets.split_last().unwrap();
+                        let mut ret = TerminatorKind::Goto { target: *otherwise };
+                        for (&v, t) in values.iter().zip(targets.iter()) {
+                            if v == constint {
+                                ret = TerminatorKind::Goto { target: *t };
+                                break;
+                            }
+                        }
+                        ret
                     } else {
-                        TerminatorKind::Goto { target: targets.1 }
+                        continue
                     }
-                }
-
-                TerminatorKind::Assert { target, cond: Operand::Constant(Constant {
-                    literal: Literal::Value {
-                        value: ConstVal::Bool(cond)
-                    }, ..
-                }), expected, .. } if cond == expected => {
+                },
+                TerminatorKind::Assert {
+                    target, cond: Operand::Constant(ref c), expected, ..
+                } if (c.literal.assert_bool(tcx) == Some(true)) == expected => {
                     TerminatorKind::Goto { target: target }
-                }
-
+                },
+                TerminatorKind::FalseEdges { real_target, .. } => {
+                    TerminatorKind::Goto { target: real_target }
+                },
+                TerminatorKind::FalseUnwind { real_target, .. } => {
+                    TerminatorKind::Goto { target: real_target }
+                },
                 _ => continue
             };
         }
     }
-}
-
-impl<'l> Pass for SimplifyBranches<'l> {
-    fn disambiguator<'a>(&'a self) -> Option<Box<fmt::Display+'a>> {
-        Some(Box::new(self.label))
-    }
-
-    // avoid calling `type_name` - it contains `<'static>`
-    fn name(&self) -> &str { "SimplifyBranches" }
 }

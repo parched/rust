@@ -10,125 +10,139 @@
 
 //! See docs in build/expr/mod.rs
 
-use std;
-
-use rustc_const_math::{ConstMathErr, Op};
-use rustc_data_structures::fnv::FnvHashMap;
+use rustc_data_structures::fx::FxHashMap;
 use rustc_data_structures::indexed_vec::Idx;
 
 use build::{BlockAnd, BlockAndExtension, Builder};
 use build::expr::category::{Category, RvalueFunc};
 use hair::*;
-use rustc_const_math::{ConstInt, ConstIsize};
-use rustc::middle::const_val::ConstVal;
-use rustc::ty;
-use rustc::mir::repr::*;
-use syntax::ast;
+use rustc::middle::region;
+use rustc::ty::{self, Ty, UpvarSubsts};
+use rustc::mir::*;
+use rustc::mir::interpret::EvalErrorKind;
 use syntax_pos::Span;
 
 impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
+    /// See comment on `as_local_operand`
+    pub fn as_local_rvalue<M>(&mut self, block: BasicBlock, expr: M)
+                             -> BlockAnd<Rvalue<'tcx>>
+        where M: Mirror<'tcx, Output = Expr<'tcx>>
+    {
+        let local_scope = self.local_scope();
+        self.as_rvalue(block, local_scope, expr)
+    }
+
     /// Compile `expr`, yielding an rvalue.
-    pub fn as_rvalue<M>(&mut self, block: BasicBlock, expr: M) -> BlockAnd<Rvalue<'tcx>>
+    pub fn as_rvalue<M>(&mut self, block: BasicBlock, scope: Option<region::Scope>, expr: M)
+                        -> BlockAnd<Rvalue<'tcx>>
         where M: Mirror<'tcx, Output = Expr<'tcx>>
     {
         let expr = self.hir.mirror(expr);
-        self.expr_as_rvalue(block, expr)
+        self.expr_as_rvalue(block, scope, expr)
     }
 
     fn expr_as_rvalue(&mut self,
                       mut block: BasicBlock,
+                      scope: Option<region::Scope>,
                       expr: Expr<'tcx>)
                       -> BlockAnd<Rvalue<'tcx>> {
-        debug!("expr_as_rvalue(block={:?}, expr={:?})", block, expr);
+        debug!("expr_as_rvalue(block={:?}, scope={:?}, expr={:?})", block, scope, expr);
 
         let this = self;
         let expr_span = expr.span;
         let source_info = this.source_info(expr_span);
 
         match expr.kind {
-            ExprKind::Scope { extent, value } => {
-                this.in_scope(extent, block, |this| this.as_rvalue(block, value))
-            }
-            ExprKind::InlineAsm { asm, outputs, inputs } => {
-                let outputs = outputs.into_iter().map(|output| {
-                    unpack!(block = this.as_lvalue(block, output))
-                }).collect();
-
-                let inputs = inputs.into_iter().map(|input| {
-                    unpack!(block = this.as_operand(block, input))
-                }).collect();
-
-                block.and(Rvalue::InlineAsm {
-                    asm: asm.clone(),
-                    outputs: outputs,
-                    inputs: inputs
-                })
+            ExprKind::Scope { region_scope, lint_level, value } => {
+                let region_scope = (region_scope, source_info);
+                this.in_scope(region_scope, lint_level, block,
+                              |this| this.as_rvalue(block, scope, value))
             }
             ExprKind::Repeat { value, count } => {
-                let value_operand = unpack!(block = this.as_operand(block, value));
+                let value_operand = unpack!(block = this.as_operand(block, scope, value));
                 block.and(Rvalue::Repeat(value_operand, count))
             }
             ExprKind::Borrow { region, borrow_kind, arg } => {
-                let arg_lvalue = unpack!(block = this.as_lvalue(block, arg));
-                block.and(Rvalue::Ref(region, borrow_kind, arg_lvalue))
+                let arg_place = unpack!(block = this.as_place(block, arg));
+                block.and(Rvalue::Ref(region, borrow_kind, arg_place))
             }
             ExprKind::Binary { op, lhs, rhs } => {
-                let lhs = unpack!(block = this.as_operand(block, lhs));
-                let rhs = unpack!(block = this.as_operand(block, rhs));
+                let lhs = unpack!(block = this.as_operand(block, scope, lhs));
+                let rhs = unpack!(block = this.as_operand(block, scope, rhs));
                 this.build_binary_op(block, op, expr_span, expr.ty,
                                      lhs, rhs)
             }
             ExprKind::Unary { op, arg } => {
-                let arg = unpack!(block = this.as_operand(block, arg));
+                let arg = unpack!(block = this.as_operand(block, scope, arg));
                 // Check for -MIN on signed integers
                 if this.hir.check_overflow() && op == UnOp::Neg && expr.ty.is_signed() {
                     let bool_ty = this.hir.bool_ty();
 
                     let minval = this.minval_literal(expr_span, expr.ty);
-                    let is_min = this.temp(bool_ty);
+                    let is_min = this.temp(bool_ty, expr_span);
 
                     this.cfg.push_assign(block, source_info, &is_min,
-                                         Rvalue::BinaryOp(BinOp::Eq, arg.clone(), minval));
+                                         Rvalue::BinaryOp(BinOp::Eq, arg.to_copy(), minval));
 
-                    let err = ConstMathErr::Overflow(Op::Neg);
-                    block = this.assert(block, Operand::Consume(is_min), false,
-                                        AssertMessage::Math(err), expr_span);
+                    block = this.assert(block, Operand::Move(is_min), false,
+                                        EvalErrorKind::OverflowNeg, expr_span);
                 }
                 block.and(Rvalue::UnaryOp(op, arg))
             }
-            ExprKind::Box { value, value_extents } => {
+            ExprKind::Box { value } => {
                 let value = this.hir.mirror(value);
-                let result = this.temp(expr.ty);
-                // to start, malloc some memory of suitable type (thus far, uninitialized):
-                this.cfg.push_assign(block, source_info, &result, Rvalue::Box(value.ty));
-                this.in_scope(value_extents, block, |this| {
+                // The `Box<T>` temporary created here is not a part of the HIR,
+                // and therefore is not considered during generator OIBIT
+                // determination. See the comment about `box` at `yield_in_scope`.
+                let result = this.local_decls.push(
+                    LocalDecl::new_internal(expr.ty, expr_span));
+                this.cfg.push(block, Statement {
+                    source_info,
+                    kind: StatementKind::StorageLive(result)
+                });
+                if let Some(scope) = scope {
                     // schedule a shallow free of that memory, lest we unwind:
-                    this.schedule_box_free(expr_span, value_extents, &result, value.ty);
-                    // initialize the box contents:
-                    unpack!(block = this.into(&result.clone().deref(), block, value));
-                    block.and(Rvalue::Use(Operand::Consume(result)))
-                })
+                    this.schedule_drop_storage_and_value(
+                        expr_span, scope, &Place::Local(result), value.ty,
+                    );
+                }
+
+                // malloc some memory of suitable type (thus far, uninitialized):
+                let box_ = Rvalue::NullaryOp(NullOp::Box, value.ty);
+                this.cfg.push_assign(block, source_info, &Place::Local(result), box_);
+
+                // initialize the box contents:
+                unpack!(block = this.into(&Place::Local(result).deref(), block, value));
+                block.and(Rvalue::Use(Operand::Move(Place::Local(result))))
             }
             ExprKind::Cast { source } => {
                 let source = this.hir.mirror(source);
 
-                let source = unpack!(block = this.as_operand(block, source));
+                let source = unpack!(block = this.as_operand(block, scope, source));
                 block.and(Rvalue::Cast(CastKind::Misc, source, expr.ty))
             }
+            ExprKind::Use { source } => {
+                let source = unpack!(block = this.as_operand(block, scope, source));
+                block.and(Rvalue::Use(source))
+            }
             ExprKind::ReifyFnPointer { source } => {
-                let source = unpack!(block = this.as_operand(block, source));
+                let source = unpack!(block = this.as_operand(block, scope, source));
                 block.and(Rvalue::Cast(CastKind::ReifyFnPointer, source, expr.ty))
             }
             ExprKind::UnsafeFnPointer { source } => {
-                let source = unpack!(block = this.as_operand(block, source));
+                let source = unpack!(block = this.as_operand(block, scope, source));
                 block.and(Rvalue::Cast(CastKind::UnsafeFnPointer, source, expr.ty))
             }
+            ExprKind::ClosureFnPointer { source } => {
+                let source = unpack!(block = this.as_operand(block, scope, source));
+                block.and(Rvalue::Cast(CastKind::ClosureFnPointer, source, expr.ty))
+            }
             ExprKind::Unsize { source } => {
-                let source = unpack!(block = this.as_operand(block, source));
+                let source = unpack!(block = this.as_operand(block, scope, source));
                 block.and(Rvalue::Cast(CastKind::Unsize, source, expr.ty))
             }
-            ExprKind::Vec { fields } => {
-                // (*) We would (maybe) be closer to trans if we
+            ExprKind::Array { fields } => {
+                // (*) We would (maybe) be closer to codegen if we
                 // handled this and other aggregate cases via
                 // `into()`, not `as_rvalue` -- in that case, instead
                 // of generating
@@ -155,46 +169,106 @@ impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
                 //     to the same MIR as `let x = ();`.
 
                 // first process the set of fields
+                let el_ty = expr.ty.sequence_element_type(this.hir.tcx());
                 let fields: Vec<_> =
                     fields.into_iter()
-                          .map(|f| unpack!(block = this.as_operand(block, f)))
+                          .map(|f| unpack!(block = this.as_operand(block, scope, f)))
                           .collect();
 
-                block.and(Rvalue::Aggregate(AggregateKind::Vec, fields))
+                block.and(Rvalue::Aggregate(box AggregateKind::Array(el_ty), fields))
             }
             ExprKind::Tuple { fields } => { // see (*) above
                 // first process the set of fields
                 let fields: Vec<_> =
                     fields.into_iter()
-                          .map(|f| unpack!(block = this.as_operand(block, f)))
+                          .map(|f| unpack!(block = this.as_operand(block, scope, f)))
                           .collect();
 
-                block.and(Rvalue::Aggregate(AggregateKind::Tuple, fields))
+                block.and(Rvalue::Aggregate(box AggregateKind::Tuple, fields))
             }
-            ExprKind::Closure { closure_id, substs, upvars } => { // see (*) above
-                let upvars =
-                    upvars.into_iter()
-                          .map(|upvar| unpack!(block = this.as_operand(block, upvar)))
-                          .collect();
-                block.and(Rvalue::Aggregate(AggregateKind::Closure(closure_id, substs), upvars))
+            ExprKind::Closure { closure_id, substs, upvars, movability } => {
+                // see (*) above
+                let mut operands: Vec<_> = upvars
+                    .into_iter()
+                    .map(|upvar| {
+                        let upvar = this.hir.mirror(upvar);
+                        match Category::of(&upvar.kind) {
+                            // Use as_place to avoid creating a temporary when
+                            // moving a variable into a closure, so that
+                            // borrowck knows which variables to mark as being
+                            // used as mut. This is OK here because the upvar
+                            // expressions have no side effects and act on
+                            // disjoint places.
+                            // This occurs when capturing by copy/move, while
+                            // by reference captures use as_operand
+                            Some(Category::Place) => {
+                                let place = unpack!(block = this.as_place(block, upvar));
+                                this.consume_by_copy_or_move(place)
+                            }
+                            _ => {
+                                // Turn mutable borrow captures into unique
+                                // borrow captures when capturing an immutable
+                                // variable. This is sound because the mutation
+                                // that caused the capture will cause an error.
+                                match upvar.kind {
+                                    ExprKind::Borrow {
+                                        borrow_kind: BorrowKind::Mut {
+                                            allow_two_phase_borrow: false
+                                        },
+                                        region,
+                                        arg,
+                                    } => unpack!(block = this.limit_capture_mutability(
+                                        upvar.span,
+                                        upvar.ty,
+                                        scope,
+                                        block,
+                                        arg,
+                                        region,
+                                    )),
+                                    _ => unpack!(block = this.as_operand(block, scope, upvar)),
+                                }
+                            }
+                        }
+                    })
+                    .collect();
+                let result = match substs {
+                    UpvarSubsts::Generator(substs) => {
+                        let movability = movability.unwrap();
+                        // Add the state operand since it follows the upvars in the generator
+                        // struct. See librustc_mir/transform/generator.rs for more details.
+                        operands.push(Operand::Constant(box Constant {
+                            span: expr_span,
+                            ty: this.hir.tcx().types.u32,
+                            literal: ty::Const::from_bits(
+                                this.hir.tcx(),
+                                0,
+                                ty::ParamEnv::empty().and(this.hir.tcx().types.u32),
+                            ),
+                        }));
+                        box AggregateKind::Generator(closure_id, substs, movability)
+                    }
+                    UpvarSubsts::Closure(substs) => {
+                        box AggregateKind::Closure(closure_id, substs)
+                    }
+                };
+                block.and(Rvalue::Aggregate(result, operands))
             }
             ExprKind::Adt {
                 adt_def, variant_index, substs, fields, base
             } => { // see (*) above
-                let is_union = adt_def.adt_kind() == ty::AdtKind::Union;
+                let is_union = adt_def.is_union();
                 let active_field_index = if is_union { Some(fields[0].name.index()) } else { None };
 
                 // first process the set of fields that were provided
                 // (evaluating them in order given by user)
-                let fields_map: FnvHashMap<_, _> =
-                    fields.into_iter()
-                          .map(|f| (f.name, unpack!(block = this.as_operand(block, f.expr))))
-                          .collect();
+                let fields_map: FxHashMap<_, _> = fields.into_iter()
+                    .map(|f| (f.name, unpack!(block = this.as_operand(block, scope, f.expr))))
+                    .collect();
 
                 let field_names = this.hir.all_fields(adt_def, variant_index);
 
                 let fields = if let Some(FruInfo { base, field_types }) = base {
-                    let base = unpack!(block = this.as_lvalue(block, base));
+                    let base = unpack!(block = this.as_place(block, base));
 
                     // MIR does not natively support FRU, so for each
                     // base-supplied field, generate an operand that
@@ -203,20 +277,32 @@ impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
                         .zip(field_types.into_iter())
                         .map(|(n, ty)| match fields_map.get(&n) {
                             Some(v) => v.clone(),
-                            None => Operand::Consume(base.clone().field(n, ty))
+                            None => this.consume_by_copy_or_move(base.clone().field(n, ty))
                         })
                         .collect()
                 } else {
                     field_names.iter().filter_map(|n| fields_map.get(n).cloned()).collect()
                 };
 
-                let adt = AggregateKind::Adt(adt_def, variant_index, substs, active_field_index);
+                let adt =
+                    box AggregateKind::Adt(adt_def, variant_index, substs, active_field_index);
                 block.and(Rvalue::Aggregate(adt, fields))
             }
             ExprKind::Assign { .. } |
             ExprKind::AssignOp { .. } => {
                 block = unpack!(this.stmt_expr(block, expr));
                 block.and(this.unit_rvalue())
+            }
+            ExprKind::Yield { value } => {
+                let value = unpack!(block = this.as_operand(block, scope, value));
+                let resume = this.cfg.start_new_block();
+                let cleanup = this.generator_drop_cleanup();
+                this.cfg.terminate(block, source_info, TerminatorKind::Yield {
+                    value: value,
+                    resume: resume,
+                    drop: cleanup,
+                });
+                resume.and(this.unit_rvalue())
             }
             ExprKind::Literal { .. } |
             ExprKind::Block { .. } |
@@ -234,6 +320,7 @@ impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
             ExprKind::Break { .. } |
             ExprKind::Continue { .. } |
             ExprKind::Return { .. } |
+            ExprKind::InlineAsm { .. } |
             ExprKind::StaticRef { .. } => {
                 // these do not have corresponding `Rvalue` variants,
                 // so make an operand and then return that
@@ -241,20 +328,20 @@ impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
                     Some(Category::Rvalue(RvalueFunc::AsRvalue)) => false,
                     _ => true,
                 });
-                let operand = unpack!(block = this.as_operand(block, expr));
+                let operand = unpack!(block = this.as_operand(block, scope, expr));
                 block.and(Rvalue::Use(operand))
             }
         }
     }
 
     pub fn build_binary_op(&mut self, mut block: BasicBlock,
-                           op: BinOp, span: Span, ty: ty::Ty<'tcx>,
+                           op: BinOp, span: Span, ty: Ty<'tcx>,
                            lhs: Operand<'tcx>, rhs: Operand<'tcx>) -> BlockAnd<Rvalue<'tcx>> {
         let source_info = self.source_info(span);
         let bool_ty = self.hir.bool_ty();
         if self.hir.check_overflow() && op.is_checkable() && ty.is_integral() {
-            let result_tup = self.hir.tcx().mk_tup(vec![ty, bool_ty]);
-            let result_value = self.temp(result_tup);
+            let result_tup = self.hir.tcx().intern_tup(&[ty, bool_ty]);
+            let result_value = self.temp(result_tup, span);
 
             self.cfg.push_assign(block, source_info,
                                  &result_value, Rvalue::CheckedBinaryOp(op,
@@ -266,42 +353,33 @@ impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
             let val = result_value.clone().field(val_fld, ty);
             let of = result_value.field(of_fld, bool_ty);
 
-            let err = ConstMathErr::Overflow(match op {
-                BinOp::Add => Op::Add,
-                BinOp::Sub => Op::Sub,
-                BinOp::Mul => Op::Mul,
-                BinOp::Shl => Op::Shl,
-                BinOp::Shr => Op::Shr,
-                _ => {
-                    bug!("MIR build_binary_op: {:?} is not checkable", op)
-                }
-            });
+            let err = EvalErrorKind::Overflow(op);
 
-            block = self.assert(block, Operand::Consume(of), false,
-                                AssertMessage::Math(err), span);
+            block = self.assert(block, Operand::Move(of), false,
+                                err, span);
 
-            block.and(Rvalue::Use(Operand::Consume(val)))
+            block.and(Rvalue::Use(Operand::Move(val)))
         } else {
             if ty.is_integral() && (op == BinOp::Div || op == BinOp::Rem) {
                 // Checking division and remainder is more complex, since we 1. always check
                 // and 2. there are two possible failure cases, divide-by-zero and overflow.
 
                 let (zero_err, overflow_err) = if op == BinOp::Div {
-                    (ConstMathErr::DivisionByZero,
-                     ConstMathErr::Overflow(Op::Div))
+                    (EvalErrorKind::DivisionByZero,
+                     EvalErrorKind::Overflow(op))
                 } else {
-                    (ConstMathErr::RemainderByZero,
-                     ConstMathErr::Overflow(Op::Rem))
+                    (EvalErrorKind::RemainderByZero,
+                     EvalErrorKind::Overflow(op))
                 };
 
                 // Check for / 0
-                let is_zero = self.temp(bool_ty);
+                let is_zero = self.temp(bool_ty, span);
                 let zero = self.zero_literal(span, ty);
                 self.cfg.push_assign(block, source_info, &is_zero,
-                                     Rvalue::BinaryOp(BinOp::Eq, rhs.clone(), zero));
+                                     Rvalue::BinaryOp(BinOp::Eq, rhs.to_copy(), zero));
 
-                block = self.assert(block, Operand::Consume(is_zero), false,
-                                    AssertMessage::Math(zero_err), span);
+                block = self.assert(block, Operand::Move(is_zero), false,
+                                    zero_err, span);
 
                 // We only need to check for the overflow in one case:
                 // MIN / -1, and only for signed values.
@@ -309,24 +387,24 @@ impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
                     let neg_1 = self.neg_1_literal(span, ty);
                     let min = self.minval_literal(span, ty);
 
-                    let is_neg_1 = self.temp(bool_ty);
-                    let is_min   = self.temp(bool_ty);
-                    let of       = self.temp(bool_ty);
+                    let is_neg_1 = self.temp(bool_ty, span);
+                    let is_min   = self.temp(bool_ty, span);
+                    let of       = self.temp(bool_ty, span);
 
                     // this does (rhs == -1) & (lhs == MIN). It could short-circuit instead
 
                     self.cfg.push_assign(block, source_info, &is_neg_1,
-                                         Rvalue::BinaryOp(BinOp::Eq, rhs.clone(), neg_1));
+                                         Rvalue::BinaryOp(BinOp::Eq, rhs.to_copy(), neg_1));
                     self.cfg.push_assign(block, source_info, &is_min,
-                                         Rvalue::BinaryOp(BinOp::Eq, lhs.clone(), min));
+                                         Rvalue::BinaryOp(BinOp::Eq, lhs.to_copy(), min));
 
-                    let is_neg_1 = Operand::Consume(is_neg_1);
-                    let is_min = Operand::Consume(is_min);
+                    let is_neg_1 = Operand::Move(is_neg_1);
+                    let is_min = Operand::Move(is_min);
                     self.cfg.push_assign(block, source_info, &of,
                                          Rvalue::BinaryOp(BinOp::BitAnd, is_neg_1, is_min));
 
-                    block = self.assert(block, Operand::Consume(of), false,
-                                        AssertMessage::Math(overflow_err), span);
+                    block = self.assert(block, Operand::Move(of), false,
+                                        overflow_err, span);
                 }
             }
 
@@ -334,60 +412,118 @@ impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
         }
     }
 
-    // Helper to get a `-1` value of the appropriate type
-    fn neg_1_literal(&mut self, span: Span, ty: ty::Ty<'tcx>) -> Operand<'tcx> {
-        let literal = match ty.sty {
-            ty::TyInt(ity) => {
-                let val = match ity {
-                    ast::IntTy::I8  => ConstInt::I8(-1),
-                    ast::IntTy::I16 => ConstInt::I16(-1),
-                    ast::IntTy::I32 => ConstInt::I32(-1),
-                    ast::IntTy::I64 => ConstInt::I64(-1),
-                    ast::IntTy::Is => {
-                        let int_ty = self.hir.tcx().sess.target.int_type;
-                        let val = ConstIsize::new(-1, int_ty).unwrap();
-                        ConstInt::Isize(val)
-                    }
-                };
+    fn limit_capture_mutability(
+        &mut self,
+        upvar_span: Span,
+        upvar_ty: Ty<'tcx>,
+        temp_lifetime: Option<region::Scope>,
+        mut block: BasicBlock,
+        arg: ExprRef<'tcx>,
+        region: &'tcx ty::RegionKind,
+    ) -> BlockAnd<Operand<'tcx>> {
+        let this = self;
 
-                Literal::Value { value: ConstVal::Integral(val) }
+        let source_info = this.source_info(upvar_span);
+        let temp = this.local_decls.push(LocalDecl::new_temp(upvar_ty, upvar_span));
+
+        this.cfg.push(block, Statement {
+            source_info,
+            kind: StatementKind::StorageLive(temp)
+        });
+
+        let arg_place = unpack!(block = this.as_place(block, arg));
+
+        let mutability = match arg_place {
+            Place::Local(local) => this.local_decls[local].mutability,
+            Place::Projection(box Projection {
+                base: Place::Local(local),
+                elem: ProjectionElem::Deref,
+            }) => {
+                debug_assert!(
+                    if let Some(ClearCrossCrate::Set(BindingForm::RefForGuard))
+                        = this.local_decls[local].is_user_variable {
+                        true
+                    } else {
+                        false
+                    },
+                    "Unexpected capture place",
+                );
+                this.local_decls[local].mutability
             }
-            _ => {
-                span_bug!(span, "Invalid type for neg_1_literal: `{:?}`", ty)
+            Place::Projection(box Projection {
+                ref base,
+                elem: ProjectionElem::Field(upvar_index, _),
+            })
+            | Place::Projection(box Projection {
+                base: Place::Projection(box Projection {
+                    ref base,
+                    elem: ProjectionElem::Field(upvar_index, _),
+                }),
+                elem: ProjectionElem::Deref,
+            }) => {
+                // Not projected from the implicit `self` in a closure.
+                debug_assert!(
+                    match *base {
+                        Place::Local(local) => local == Local::new(1),
+                        Place::Projection(box Projection {
+                            ref base,
+                            elem: ProjectionElem::Deref,
+                        }) => *base == Place::Local(Local::new(1)),
+                        _ => false,
+                    },
+                    "Unexpected capture place"
+                );
+                // Not in a closure
+                debug_assert!(
+                    this.upvar_decls.len() > upvar_index.index(),
+                    "Unexpected capture place"
+                );
+                this.upvar_decls[upvar_index.index()].mutability
             }
+            _ => bug!("Unexpected capture place"),
         };
+
+        let borrow_kind = match mutability {
+            Mutability::Not => BorrowKind::Unique,
+            Mutability::Mut => BorrowKind::Mut { allow_two_phase_borrow: false },
+        };
+
+        this.cfg.push_assign(
+            block,
+            source_info,
+            &Place::Local(temp),
+            Rvalue::Ref(region, borrow_kind, arg_place),
+        );
+
+        // In constants, temp_lifetime is None. We should not need to drop
+        // anything because no values with a destructor can be created in
+        // a constant at this time, even if the type may need dropping.
+        if let Some(temp_lifetime) = temp_lifetime {
+            this.schedule_drop_storage_and_value(
+                upvar_span, temp_lifetime, &Place::Local(temp), upvar_ty,
+            );
+        }
+
+        block.and(Operand::Move(Place::Local(temp)))
+    }
+
+    // Helper to get a `-1` value of the appropriate type
+    fn neg_1_literal(&mut self, span: Span, ty: Ty<'tcx>) -> Operand<'tcx> {
+        let param_ty = ty::ParamEnv::empty().and(self.hir.tcx().lift_to_global(&ty).unwrap());
+        let bits = self.hir.tcx().layout_of(param_ty).unwrap().size.bits();
+        let n = (!0u128) >> (128 - bits);
+        let literal = ty::Const::from_bits(self.hir.tcx(), n, param_ty);
 
         self.literal_operand(span, ty, literal)
     }
 
     // Helper to get the minimum value of the appropriate type
-    fn minval_literal(&mut self, span: Span, ty: ty::Ty<'tcx>) -> Operand<'tcx> {
-        let literal = match ty.sty {
-            ty::TyInt(ity) => {
-                let val = match ity {
-                    ast::IntTy::I8  => ConstInt::I8(std::i8::MIN),
-                    ast::IntTy::I16 => ConstInt::I16(std::i16::MIN),
-                    ast::IntTy::I32 => ConstInt::I32(std::i32::MIN),
-                    ast::IntTy::I64 => ConstInt::I64(std::i64::MIN),
-                    ast::IntTy::Is => {
-                        let int_ty = self.hir.tcx().sess.target.int_type;
-                        let min = match int_ty {
-                            ast::IntTy::I16 => std::i16::MIN as i64,
-                            ast::IntTy::I32 => std::i32::MIN as i64,
-                            ast::IntTy::I64 => std::i64::MIN,
-                            _ => unreachable!()
-                        };
-                        let val = ConstIsize::new(min, int_ty).unwrap();
-                        ConstInt::Isize(val)
-                    }
-                };
-
-                Literal::Value { value: ConstVal::Integral(val) }
-            }
-            _ => {
-                span_bug!(span, "Invalid type for minval_literal: `{:?}`", ty)
-            }
-        };
+    fn minval_literal(&mut self, span: Span, ty: Ty<'tcx>) -> Operand<'tcx> {
+        assert!(ty.is_signed());
+        let param_ty = ty::ParamEnv::empty().and(self.hir.tcx().lift_to_global(&ty).unwrap());
+        let bits = self.hir.tcx().layout_of(param_ty).unwrap().size.bits();
+        let n = 1 << (bits - 1);
+        let literal = ty::Const::from_bits(self.hir.tcx(), n, param_ty);
 
         self.literal_operand(span, ty, literal)
     }

@@ -12,6 +12,8 @@
 
 #![feature(plugin_registrar, rustc_private)]
 #![feature(box_syntax)]
+#![feature(macro_vis_matcher)]
+#![feature(macro_at_most_once_rep)]
 
 #[macro_use] extern crate rustc;
 extern crate rustc_plugin;
@@ -32,7 +34,7 @@ impl LintPass for Pass {
     }
 }
 
-impl LateLintPass for Pass {
+impl<'a, 'tcx> LateLintPass<'a, 'tcx> for Pass {
     fn check_crate(&mut self, cx: &LateContext, krate: &hir::Crate) {
         if !attr::contains_name(&krate.attrs, "crate_okay") {
             cx.span_lint(CRATE_NOT_OKAY, krate.span,
@@ -43,5 +45,5 @@ impl LateLintPass for Pass {
 
 #[plugin_registrar]
 pub fn plugin_registrar(reg: &mut Registry) {
-    reg.register_late_lint_pass(box Pass as LateLintPassObject);
+    reg.register_late_lint_pass(box Pass);
 }

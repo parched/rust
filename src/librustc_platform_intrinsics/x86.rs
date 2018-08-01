@@ -16,9 +16,6 @@
 use {Intrinsic, Type};
 use IntrinsicDef::Named;
 
-// The default inlining settings trigger a pathological behaviour in
-// LLVM, which causes makes compilation very slow. See #28273.
-#[inline(never)]
 pub fn find(name: &str) -> Option<Intrinsic> {
     if !name.starts_with("x86") { return None }
     Some(match &name["x86".len()..] {
@@ -354,7 +351,7 @@ pub fn find(name: &str) -> Option<Intrinsic> {
         },
         "_mm256_sad_epu8" => Intrinsic {
             inputs: { static INPUTS: [&'static Type; 2] = [&::U8x32, &::U8x32]; &INPUTS },
-            output: &::U8x32,
+            output: &::U64x4,
             definition: Named("llvm.x86.avx2.psad.bw")
         },
         "_mm256_shuffle_epi8" => Intrinsic {
@@ -871,6 +868,36 @@ pub fn find(name: &str) -> Option<Intrinsic> {
             inputs: { static INPUTS: [&'static Type; 3] = [&::F64x4, &::F64x4, &::F64x4]; &INPUTS },
             output: &::F64x4,
             definition: Named("llvm.x86.fma.vfnmsub.pd.256")
+        },
+        "_rdrand16_step" => Intrinsic {
+            inputs: { static INPUTS: [&'static Type; 0] = []; &INPUTS },
+            output: { static AGG: Type = Type::Aggregate(false, { static PARTS: [&'static Type; 2] = [&::U16, &::I32]; &PARTS }); &AGG },
+            definition: Named("llvm.x86.rdrand.16")
+        },
+        "_rdrand32_step" => Intrinsic {
+            inputs: { static INPUTS: [&'static Type; 0] = []; &INPUTS },
+            output: { static AGG: Type = Type::Aggregate(false, { static PARTS: [&'static Type; 2] = [&::U32, &::I32]; &PARTS }); &AGG },
+            definition: Named("llvm.x86.rdrand.32")
+        },
+        "_rdrand64_step" => Intrinsic {
+            inputs: { static INPUTS: [&'static Type; 0] = []; &INPUTS },
+            output: { static AGG: Type = Type::Aggregate(false, { static PARTS: [&'static Type; 2] = [&::U64, &::I32]; &PARTS }); &AGG },
+            definition: Named("llvm.x86.rdrand.64")
+        },
+        "_rdseed16_step" => Intrinsic {
+            inputs: { static INPUTS: [&'static Type; 0] = []; &INPUTS },
+            output: { static AGG: Type = Type::Aggregate(false, { static PARTS: [&'static Type; 2] = [&::U16, &::I32]; &PARTS }); &AGG },
+            definition: Named("llvm.x86.rdseed.16")
+        },
+        "_rdseed32_step" => Intrinsic {
+            inputs: { static INPUTS: [&'static Type; 0] = []; &INPUTS },
+            output: { static AGG: Type = Type::Aggregate(false, { static PARTS: [&'static Type; 2] = [&::U32, &::I32]; &PARTS }); &AGG },
+            definition: Named("llvm.x86.rdseed.32")
+        },
+        "_rdseed64_step" => Intrinsic {
+            inputs: { static INPUTS: [&'static Type; 0] = []; &INPUTS },
+            output: { static AGG: Type = Type::Aggregate(false, { static PARTS: [&'static Type; 2] = [&::U64, &::I32]; &PARTS }); &AGG },
+            definition: Named("llvm.x86.rdseed.64")
         },
         "_mm_adds_epi8" => Intrinsic {
             inputs: { static INPUTS: [&'static Type; 2] = [&::I8x16, &::I8x16]; &INPUTS },

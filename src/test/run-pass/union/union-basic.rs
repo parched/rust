@@ -10,8 +10,6 @@
 
 // aux-build:union.rs
 
-#![feature(untagged_unions)]
-
 extern crate union;
 use std::mem::{size_of, align_of, zeroed};
 
@@ -37,7 +35,7 @@ fn local() {
         assert_eq!(w.b, 0);
         w.a = 1;
         assert_eq!(w.a, 1);
-        assert_eq!(w.b, 1);
+        assert_eq!(w.b.to_le(), 1);
     }
 }
 
@@ -58,7 +56,7 @@ fn xcrate() {
         assert_eq!(w.b, 0);
         w.a = 1;
         assert_eq!(w.a, 1);
-        assert_eq!(w.b, 1);
+        assert_eq!(w.b.to_le(), 1);
     }
 }
 

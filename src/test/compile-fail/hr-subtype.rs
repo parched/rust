@@ -84,16 +84,13 @@ check! { free_inv_x_vs_free_inv_y: (fn(Inv<'x>),
                                     fn(Inv<'y>)) }
 
 // Somewhat surprisingly, a fn taking two distinct bound lifetimes and
-// a fn taking one bound lifetime can be interchangable, but only if
+// a fn taking one bound lifetime can be interchangeable, but only if
 // we are co- or contra-variant with respect to both lifetimes.
 //
 // The reason is:
 // - if we are covariant, then 'a and 'b can be set to the call-site
 //   intersection;
 // - if we are contravariant, then 'a can be inferred to 'static.
-//
-// FIXME(#32330) this is true, but we are not currently impl'ing this
-// full semantics
 check! { bound_a_b_vs_bound_a: (for<'a,'b> fn(&'a u32, &'b u32),
                                 for<'a>    fn(&'a u32, &'a u32)) }
 check! { bound_co_a_b_vs_bound_co_a: (for<'a,'b> fn(Co<'a>, Co<'b>),
@@ -103,7 +100,7 @@ check! { bound_contra_a_contra_b_ret_co_a: (for<'a,'b> fn(Contra<'a>, Contra<'b>
 check! { bound_co_a_co_b_ret_contra_a: (for<'a,'b> fn(Co<'a>, Co<'b>) -> Contra<'a>,
                                         for<'a>    fn(Co<'a>, Co<'a>) -> Contra<'a>) }
 
-// If we make those lifetimes invariant, then the two types are not interchangable.
+// If we make those lifetimes invariant, then the two types are not interchangeable.
 check! { bound_inv_a_b_vs_bound_inv_a: (for<'a,'b> fn(Inv<'a>, Inv<'b>),
                                         for<'a>    fn(Inv<'a>, Inv<'a>)) }
 check! { bound_a_b_ret_a_vs_bound_a_ret_a: (for<'a,'b> fn(&'a u32, &'b u32) -> &'a u32,

@@ -101,29 +101,24 @@ properties: `ident`, `non_null`, `non_eol`, `non_single_quote` and
 
 ### Identifiers
 
-The `ident` production is any nonempty Unicode[^non_ascii_idents] string of
+The `ident` production is any nonempty Unicode string of
 the following form:
 
-[^non_ascii_idents]: Non-ASCII characters in identifiers are currently feature
-  gated. This is expected to improve soon.
+- The first character is in one of the following ranges `U+0041` to `U+005A`
+("A" to "Z"), `U+0061` to `U+007A` ("a" to "z"), or `U+005F` ("\_").
+- The remaining characters are in the range `U+0030` to `U+0039` ("0" to "9"),
+or any of the prior valid initial characters.
 
-- The first character has property `XID_start`
-- The remaining characters have property `XID_continue`
-
-that does _not_ occur in the set of [keywords](#keywords).
-
-> **Note**: `XID_start` and `XID_continue` as character properties cover the
-> character ranges used to form the more familiar C and Java language-family
-> identifiers.
+as long as the identifier does _not_ occur in the set of [keywords](#keywords).
 
 ### Delimiter-restricted productions
 
 Some productions are defined by exclusion of particular Unicode characters:
 
 - `non_null` is any single Unicode character aside from `U+0000` (null)
-- `non_eol` is `non_null` restricted to exclude `U+000A` (`'\n'`)
-- `non_single_quote` is `non_null` restricted to exclude `U+0027`  (`'`)
-- `non_double_quote` is `non_null` restricted to exclude `U+0022` (`"`)
+- `non_eol` is any single Unicode character aside from `U+000A` (`'\n'`)
+- `non_single_quote` is any single Unicode character aside from `U+0027`  (`'`)
+- `non_double_quote` is any single Unicode character aside from `U+0022` (`"`)
 
 ## Comments
 
@@ -154,19 +149,19 @@ token : simple_token | ident | literal | symbol | whitespace token ;
 
 <p id="keyword-table-marker"></p>
 
-|          |          |          |          |         |
-|----------|----------|----------|----------|---------|
-| abstract | alignof  | as       | become   | box     |
-| break    | const    | continue | crate    | do      |
-| else     | enum     | extern   | false    | final   |
-| fn       | for      | if       | impl     | in      |
-| let      | loop     | macro    | match    | mod     |
-| move     | mut      | offsetof | override | priv    |
-| proc     | pub      | pure     | ref      | return  |
-| Self     | self     | sizeof   | static   | struct  |
-| super    | trait    | true     | type     | typeof  |
-| unsafe   | unsized  | use      | virtual  | where   |
-| while    | yield    |          |          |         |
+|          |          |          |          |          |
+|----------|----------|----------|----------|----------|
+| _        | abstract | alignof  | as       | become   |
+| box      | break    | const    | continue | crate    |
+| do       | else     | enum     | extern   | false    |
+| final    | fn       | for      | if       | impl     |
+| in       | let      | loop     | macro    | match    |
+| mod      | move     | mut      | offsetof | override |
+| priv     | proc     | pub      | pure     | ref      |
+| return   | Self     | self     | sizeof   | static   |
+| struct   | super    | trait    | true     | type     |
+| typeof   | unsafe   | unsized  | use      | virtual  |
+| where    | while    | yield    |          |          |
 
 
 Each of these keywords has special meaning in its grammar, and all of them are
@@ -187,7 +182,7 @@ literal : [ string_lit | char_lit | byte_string_lit | byte_lit | num_lit | bool_
 The optional `lit_suffix` production is only used for certain numeric literals,
 but is reserved for future extension. That is, the above gives the lexical
 grammar, but a Rust parser will reject everything but the 12 special cases
-mentioned in [Number literals](reference.html#number-literals) in the
+mentioned in [Number literals](reference/tokens.html#number-literals) in the
 reference.
 
 #### Character and string literals
@@ -510,8 +505,9 @@ unit_expr : "()" ;
 ### Structure expressions
 
 ```antlr
-struct_expr : expr_path '{' ident ':' expr
-                      [ ',' ident ':' expr ] *
+struct_expr_field_init : ident | ident ':' expr ;
+struct_expr : expr_path '{' struct_expr_field_init
+                      [ ',' struct_expr_field_init ] *
                       [ ".." expr ] '}' |
               expr_path '(' expr
                       [ ',' expr ] * ')' |
@@ -760,8 +756,13 @@ closure_type := [ 'unsafe' ] [ '<' lifetime-list '>' ] '|' arg-list '|'
                 [ ':' bound-list ] [ '->' type ]
 lifetime-list := lifetime | lifetime ',' lifetime-list
 arg-list := ident ':' type | ident ':' type ',' arg-list
-bound-list := bound | bound '+' bound-list
-bound := path | lifetime
+```
+
+### Never type
+An empty type
+
+```antlr
+never_type : "!" ;
 ```
 
 ### Object types
@@ -771,6 +772,16 @@ bound := path | lifetime
 ### Type parameters
 
 **FIXME:** grammar?
+
+### Type parameter bounds
+
+```antlr
+bound-list := bound | bound '+' bound-list '+' ?
+bound := ty_bound | lt_bound
+lt_bound := lifetime
+ty_bound := ty_bound_noparen | (ty_bound_noparen)
+ty_bound_noparen := [?] [ for<lt_param_defs> ] simple_path
+```
 
 ### Self types
 

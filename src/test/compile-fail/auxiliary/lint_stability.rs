@@ -7,6 +7,7 @@
 // <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
+
 #![crate_name="lint_stability"]
 #![crate_type = "lib"]
 #![feature(staged_api)]
@@ -19,6 +20,10 @@ pub fn deprecated() {}
 #[stable(feature = "test_feature", since = "1.0.0")]
 #[rustc_deprecated(since = "1.0.0", reason = "text")]
 pub fn deprecated_text() {}
+
+#[stable(feature = "test_feature", since = "1.0.0")]
+#[rustc_deprecated(since = "99.99.99", reason = "text")]
+pub fn deprecated_future() {}
 
 #[unstable(feature = "test_feature", issue = "0")]
 #[rustc_deprecated(since = "1.0.0", reason = "text")]
@@ -132,6 +137,10 @@ pub struct UnstableStruct {
 pub struct StableStruct {
     #[stable(feature = "test_feature", since = "1.0.0")] pub i: isize
 }
+#[unstable(feature = "test_feature", issue = "0")]
+pub enum UnstableEnum {}
+#[stable(feature = "rust1", since = "1.0.0")]
+pub enum StableEnum {}
 
 #[stable(feature = "test_feature", since = "1.0.0")]
 #[rustc_deprecated(since = "1.0.0", reason = "text")]

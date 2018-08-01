@@ -43,8 +43,10 @@ use std::{mem, ptr, slice, vec};
 
 use serialize::{Encodable, Decodable, Encoder, Decoder};
 
+use rustc_data_structures::stable_hasher::{StableHasher, StableHasherResult,
+                                           HashStable};
 /// An owned smart pointer.
-#[derive(Hash, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Hash, PartialEq, Eq)]
 pub struct P<T: ?Sized> {
     ptr: Box<T>
 }
@@ -66,7 +68,7 @@ impl<T: 'static> P<T> {
         f(*self.ptr)
     }
     /// Equivalent to and_then(|x| x)
-    pub fn unwrap(self) -> T {
+    pub fn into_inner(self) -> T {
         *self.ptr
     }
 
@@ -154,6 +156,7 @@ impl<T> P<[T]> {
 }
 
 impl<T> Default for P<[T]> {
+    /// Creates an empty `P<[T]>`.
     fn default() -> P<[T]> {
         P::new()
     }
@@ -208,9 +211,16 @@ impl<T: Encodable> Encodable for P<[T]> {
 
 impl<T: Decodable> Decodable for P<[T]> {
     fn decode<D: Decoder>(d: &mut D) -> Result<P<[T]>, D::Error> {
-        Ok(P::from_vec(match Decodable::decode(d) {
-            Ok(t) => t,
-            Err(e) => return Err(e)
-        }))
+        Ok(P::from_vec(Decodable::decode(d)?))
+    }
+}
+
+impl<CTX, T> HashStable<CTX> for P<T>
+    where T: ?Sized + HashStable<CTX>
+{
+    fn hash_stable<W: StableHasherResult>(&self,
+                                          hcx: &mut CTX,
+                                          hasher: &mut StableHasher<W>) {
+        (**self).hash_stable(hcx, hasher);
     }
 }

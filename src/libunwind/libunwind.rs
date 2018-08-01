@@ -18,7 +18,7 @@ macro_rules! cfg_if {
 use libc::{c_int, c_void, uintptr_t};
 
 #[repr(C)]
-#[derive(Copy, Clone, PartialEq)]
+#[derive(Debug, Copy, Clone, PartialEq)]
 pub enum _Unwind_Reason_Code {
     _URC_NO_REASON = 0,
     _URC_FOREIGN_EXCEPTION_CAUGHT = 1,
@@ -62,7 +62,13 @@ pub const unwinder_private_data_size: usize = 2;
 #[cfg(any(target_arch = "powerpc", target_arch = "powerpc64"))]
 pub const unwinder_private_data_size: usize = 2;
 
-#[cfg(target_arch = "asmjs")]
+#[cfg(target_arch = "s390x")]
+pub const unwinder_private_data_size: usize = 2;
+
+#[cfg(target_arch = "sparc64")]
+pub const unwinder_private_data_size: usize = 2;
+
+#[cfg(target_os = "emscripten")]
 pub const unwinder_private_data_size: usize = 20;
 
 #[repr(C)]
@@ -77,7 +83,7 @@ pub enum _Unwind_Context {}
 pub type _Unwind_Exception_Cleanup_Fn = extern "C" fn(unwind_code: _Unwind_Reason_Code,
                                                       exception: *mut _Unwind_Exception);
 extern "C" {
-    #[unwind]
+    #[unwind(allowed)]
     pub fn _Unwind_Resume(exception: *mut _Unwind_Exception) -> !;
     pub fn _Unwind_DeleteException(exception: *mut _Unwind_Exception);
     pub fn _Unwind_GetLanguageSpecificData(ctx: *mut _Unwind_Context) -> *mut c_void;
@@ -87,8 +93,7 @@ extern "C" {
 }
 
 cfg_if! {
-if #[cfg(not(any(all(target_os = "android", target_arch = "arm"),
-                 all(target_os = "linux", target_arch = "arm"))))] {
+if #[cfg(all(any(target_os = "ios", target_os = "netbsd", not(target_arch = "arm"))))] {
     // Not ARM EHABI
     #[repr(C)]
     #[derive(Copy, Clone, PartialEq)]
@@ -215,7 +220,7 @@ if #[cfg(not(any(all(target_os = "android", target_arch = "arm"),
 if #[cfg(not(all(target_os = "ios", target_arch = "arm")))] {
     // Not 32-bit iOS
     extern "C" {
-        #[unwind]
+        #[unwind(allowed)]
         pub fn _Unwind_RaiseException(exception: *mut _Unwind_Exception) -> _Unwind_Reason_Code;
         pub fn _Unwind_Backtrace(trace: _Unwind_Trace_Fn,
                                  trace_argument: *mut c_void)
@@ -224,7 +229,7 @@ if #[cfg(not(all(target_os = "ios", target_arch = "arm")))] {
 } else {
     // 32-bit iOS uses SjLj and does not provide _Unwind_Backtrace()
     extern "C" {
-        #[unwind]
+        #[unwind(allowed)]
         pub fn _Unwind_SjLj_RaiseException(e: *mut _Unwind_Exception) -> _Unwind_Reason_Code;
     }
 
@@ -234,31 +239,3 @@ if #[cfg(not(all(target_os = "ios", target_arch = "arm")))] {
     }
 }
 } // cfg_if!
-
-#[cfg_attr(any(all(target_os = "linux", not(target_env = "musl")),
-               target_os = "freebsd",
-               target_os = "solaris",
-               all(target_os = "linux",
-                   target_env = "musl",
-                   not(target_arch = "x86"),
-                   not(target_arch = "x86_64"))),
-           link(name = "gcc_s"))]
-#[cfg_attr(all(target_os = "linux",
-               target_env = "musl",
-               any(target_arch = "x86", target_arch = "x86_64"),
-               not(test)),
-           link(name = "unwind", kind = "static"))]
-#[cfg_attr(any(target_os = "android", target_os = "openbsd"),
-           link(name = "gcc"))]
-#[cfg_attr(all(target_os = "netbsd", not(target_vendor = "rumprun")),
-           link(name = "gcc"))]
-#[cfg_attr(all(target_os = "netbsd", target_vendor = "rumprun"),
-           link(name = "unwind"))]
-#[cfg_attr(target_os = "dragonfly",
-           link(name = "gcc_pic"))]
-#[cfg_attr(target_os = "bitrig",
-           link(name = "c++abi"))]
-#[cfg_attr(all(target_os = "windows", target_env = "gnu"),
-           link(name = "gcc_eh"))]
-#[cfg(not(cargobuild))]
-extern "C" {}

@@ -8,85 +8,178 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-#![crate_name = "alloc_system"]
-#![crate_type = "rlib"]
 #![no_std]
-#![allocator]
-#![cfg_attr(not(stage0), deny(warnings))]
+#![allow(unused_attributes)]
 #![unstable(feature = "alloc_system",
             reason = "this library is unlikely to be stabilized in its current \
                       form or name",
-            issue = "27783")]
-#![feature(allocator)]
+            issue = "32838")]
+#![feature(allocator_api)]
+#![feature(core_intrinsics)]
 #![feature(staged_api)]
-#![cfg_attr(unix, feature(libc))]
+#![feature(rustc_attrs)]
+#![cfg_attr(any(unix, target_os = "cloudabi", target_os = "redox"), feature(libc))]
+#![rustc_alloc_kind = "lib"]
 
 // The minimum alignment guaranteed by the architecture. This value is used to
-// add fast paths for low alignment values. In practice, the alignment is a
-// constant at the call site and the branch will be optimized out.
+// add fast paths for low alignment values.
 #[cfg(all(any(target_arch = "x86",
               target_arch = "arm",
               target_arch = "mips",
               target_arch = "powerpc",
               target_arch = "powerpc64",
-              target_arch = "asmjs")))]
+              target_arch = "asmjs",
+              target_arch = "wasm32")))]
+#[allow(dead_code)]
 const MIN_ALIGN: usize = 8;
 #[cfg(all(any(target_arch = "x86_64",
               target_arch = "aarch64",
-              target_arch = "mips64")))]
+              target_arch = "mips64",
+              target_arch = "s390x",
+              target_arch = "sparc64")))]
+#[allow(dead_code)]
 const MIN_ALIGN: usize = 16;
 
-#[no_mangle]
-pub extern "C" fn __rust_allocate(size: usize, align: usize) -> *mut u8 {
-    unsafe { imp::allocate(size, align) }
+use core::alloc::{Alloc, GlobalAlloc, AllocErr, Layout};
+use core::ptr::NonNull;
+
+/// The default memory allocator provided by the operating system.
+///
+/// This is based on `malloc` on Unix platforms and `HeapAlloc` on Windows,
+/// plus related functions.
+///
+/// This type can be used in a `static` item
+/// with the `#[global_allocator]` attribute
+/// to force the global allocator to be the system’s one.
+/// (The default is jemalloc for executables, on some platforms.)
+///
+/// ```rust
+/// use std::alloc::System;
+///
+/// #[global_allocator]
+/// static A: System = System;
+///
+/// fn main() {
+///     let a = Box::new(4); // Allocates from the system allocator.
+///     println!("{}", a);
+/// }
+/// ```
+///
+/// It can also be used directly to allocate memory
+/// independently of the standard library’s global allocator.
+#[stable(feature = "alloc_system_type", since = "1.28.0")]
+pub struct System;
+
+#[unstable(feature = "allocator_api", issue = "32838")]
+unsafe impl Alloc for System {
+    #[inline]
+    unsafe fn alloc(&mut self, layout: Layout) -> Result<NonNull<u8>, AllocErr> {
+        NonNull::new(GlobalAlloc::alloc(self, layout)).ok_or(AllocErr)
+    }
+
+    #[inline]
+    unsafe fn alloc_zeroed(&mut self, layout: Layout) -> Result<NonNull<u8>, AllocErr> {
+        NonNull::new(GlobalAlloc::alloc_zeroed(self, layout)).ok_or(AllocErr)
+    }
+
+    #[inline]
+    unsafe fn dealloc(&mut self, ptr: NonNull<u8>, layout: Layout) {
+        GlobalAlloc::dealloc(self, ptr.as_ptr(), layout)
+    }
+
+    #[inline]
+    unsafe fn realloc(&mut self,
+                      ptr: NonNull<u8>,
+                      layout: Layout,
+                      new_size: usize) -> Result<NonNull<u8>, AllocErr> {
+        NonNull::new(GlobalAlloc::realloc(self, ptr.as_ptr(), layout, new_size)).ok_or(AllocErr)
+    }
 }
 
-#[no_mangle]
-pub extern "C" fn __rust_deallocate(ptr: *mut u8, old_size: usize, align: usize) {
-    unsafe { imp::deallocate(ptr, old_size, align) }
-}
-
-#[no_mangle]
-pub extern "C" fn __rust_reallocate(ptr: *mut u8,
-                                    old_size: usize,
-                                    size: usize,
-                                    align: usize)
-                                    -> *mut u8 {
-    unsafe { imp::reallocate(ptr, old_size, size, align) }
-}
-
-#[no_mangle]
-pub extern "C" fn __rust_reallocate_inplace(ptr: *mut u8,
-                                            old_size: usize,
-                                            size: usize,
-                                            align: usize)
-                                            -> usize {
-    unsafe { imp::reallocate_inplace(ptr, old_size, size, align) }
-}
-
-#[no_mangle]
-pub extern "C" fn __rust_usable_size(size: usize, align: usize) -> usize {
-    imp::usable_size(size, align)
-}
-
-#[cfg(unix)]
-mod imp {
-    extern crate libc;
-
+#[cfg(any(windows, unix, target_os = "cloudabi", target_os = "redox"))]
+mod realloc_fallback {
+    use core::alloc::{GlobalAlloc, Layout};
     use core::cmp;
     use core::ptr;
-    use MIN_ALIGN;
 
-    pub unsafe fn allocate(size: usize, align: usize) -> *mut u8 {
-        if align <= MIN_ALIGN {
-            libc::malloc(size as libc::size_t) as *mut u8
-        } else {
-            aligned_malloc(size, align)
+    impl super::System {
+        pub(crate) unsafe fn realloc_fallback(&self, ptr: *mut u8, old_layout: Layout,
+                                              new_size: usize) -> *mut u8 {
+            // Docs for GlobalAlloc::realloc require this to be valid:
+            let new_layout = Layout::from_size_align_unchecked(new_size, old_layout.align());
+
+            let new_ptr = GlobalAlloc::alloc(self, new_layout);
+            if !new_ptr.is_null() {
+                let size = cmp::min(old_layout.size(), new_size);
+                ptr::copy_nonoverlapping(ptr, new_ptr, size);
+                GlobalAlloc::dealloc(self, ptr, old_layout);
+            }
+            new_ptr
+        }
+    }
+}
+
+#[cfg(any(unix, target_os = "cloudabi", target_os = "redox"))]
+mod platform {
+    extern crate libc;
+
+    use core::ptr;
+
+    use MIN_ALIGN;
+    use System;
+    use core::alloc::{GlobalAlloc, Layout};
+
+    #[stable(feature = "alloc_system_type", since = "1.28.0")]
+    unsafe impl GlobalAlloc for System {
+        #[inline]
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            if layout.align() <= MIN_ALIGN && layout.align() <= layout.size() {
+                libc::malloc(layout.size()) as *mut u8
+            } else {
+                #[cfg(target_os = "macos")]
+                {
+                    if layout.align() > (1 << 31) {
+                        return ptr::null_mut()
+                    }
+                }
+                aligned_malloc(&layout)
+            }
+        }
+
+        #[inline]
+        unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+            if layout.align() <= MIN_ALIGN && layout.align() <= layout.size() {
+                libc::calloc(layout.size(), 1) as *mut u8
+            } else {
+                let ptr = self.alloc(layout.clone());
+                if !ptr.is_null() {
+                    ptr::write_bytes(ptr, 0, layout.size());
+                }
+                ptr
+            }
+        }
+
+        #[inline]
+        unsafe fn dealloc(&self, ptr: *mut u8, _layout: Layout) {
+            libc::free(ptr as *mut libc::c_void)
+        }
+
+        #[inline]
+        unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+            if layout.align() <= MIN_ALIGN && layout.align() <= new_size {
+                libc::realloc(ptr as *mut libc::c_void, new_size) as *mut u8
+            } else {
+                self.realloc_fallback(ptr, layout, new_size)
+            }
         }
     }
 
-    #[cfg(target_os = "android")]
-    unsafe fn aligned_malloc(size: usize, align: usize) -> *mut u8 {
+    #[cfg(any(target_os = "android",
+              target_os = "hermit",
+              target_os = "redox",
+              target_os = "solaris"))]
+    #[inline]
+    unsafe fn aligned_malloc(layout: &Layout) -> *mut u8 {
         // On android we currently target API level 9 which unfortunately
         // doesn't have the `posix_memalign` API used below. Instead we use
         // `memalign`, but this unfortunately has the property on some systems
@@ -104,54 +197,31 @@ mod imp {
         // [3]: https://bugs.chromium.org/p/chromium/issues/detail?id=138579
         // [4]: https://chromium.googlesource.com/chromium/src/base/+/master/
         //                                       /memory/aligned_memory.cc
-        libc::memalign(align as libc::size_t, size as libc::size_t) as *mut u8
+        libc::memalign(layout.align(), layout.size()) as *mut u8
     }
 
-    #[cfg(not(target_os = "android"))]
-    unsafe fn aligned_malloc(size: usize, align: usize) -> *mut u8 {
+    #[cfg(not(any(target_os = "android",
+                  target_os = "hermit",
+                  target_os = "redox",
+                  target_os = "solaris")))]
+    #[inline]
+    unsafe fn aligned_malloc(layout: &Layout) -> *mut u8 {
         let mut out = ptr::null_mut();
-        let ret = libc::posix_memalign(&mut out, align as libc::size_t, size as libc::size_t);
+        let ret = libc::posix_memalign(&mut out, layout.align(), layout.size());
         if ret != 0 {
             ptr::null_mut()
         } else {
             out as *mut u8
         }
     }
-
-    pub unsafe fn reallocate(ptr: *mut u8, old_size: usize, size: usize, align: usize) -> *mut u8 {
-        if align <= MIN_ALIGN {
-            libc::realloc(ptr as *mut libc::c_void, size as libc::size_t) as *mut u8
-        } else {
-            let new_ptr = allocate(size, align);
-            if !new_ptr.is_null() {
-                ptr::copy(ptr, new_ptr, cmp::min(size, old_size));
-                deallocate(ptr, old_size, align);
-            }
-            new_ptr
-        }
-    }
-
-    pub unsafe fn reallocate_inplace(_ptr: *mut u8,
-                                     old_size: usize,
-                                     _size: usize,
-                                     _align: usize)
-                                     -> usize {
-        old_size
-    }
-
-    pub unsafe fn deallocate(ptr: *mut u8, _old_size: usize, _align: usize) {
-        libc::free(ptr as *mut libc::c_void)
-    }
-
-    pub fn usable_size(size: usize, _align: usize) -> usize {
-        size
-    }
 }
 
 #[cfg(windows)]
 #[allow(bad_style)]
-mod imp {
+mod platform {
     use MIN_ALIGN;
+    use System;
+    use core::alloc::{GlobalAlloc, Layout};
 
     type LPVOID = *mut u8;
     type HANDLE = LPVOID;
@@ -164,12 +234,13 @@ mod imp {
         fn HeapAlloc(hHeap: HANDLE, dwFlags: DWORD, dwBytes: SIZE_T) -> LPVOID;
         fn HeapReAlloc(hHeap: HANDLE, dwFlags: DWORD, lpMem: LPVOID, dwBytes: SIZE_T) -> LPVOID;
         fn HeapFree(hHeap: HANDLE, dwFlags: DWORD, lpMem: LPVOID) -> BOOL;
+        fn GetLastError() -> DWORD;
     }
 
     #[repr(C)]
     struct Header(*mut u8);
 
-    const HEAP_REALLOC_IN_PLACE_ONLY: DWORD = 0x00000010;
+    const HEAP_ZERO_MEMORY: DWORD = 0x00000008;
 
     unsafe fn get_header<'a>(ptr: *mut u8) -> &'a mut Header {
         &mut *(ptr as *mut Header).offset(-1)
@@ -181,66 +252,106 @@ mod imp {
         aligned
     }
 
-    pub unsafe fn allocate(size: usize, align: usize) -> *mut u8 {
-        if align <= MIN_ALIGN {
-            HeapAlloc(GetProcessHeap(), 0, size as SIZE_T) as *mut u8
+    #[inline]
+    unsafe fn allocate_with_flags(layout: Layout, flags: DWORD) -> *mut u8 {
+        let ptr = if layout.align() <= MIN_ALIGN {
+            HeapAlloc(GetProcessHeap(), flags, layout.size())
         } else {
-            let ptr = HeapAlloc(GetProcessHeap(), 0, (size + align) as SIZE_T) as *mut u8;
+            let size = layout.size() + layout.align();
+            let ptr = HeapAlloc(GetProcessHeap(), flags, size);
             if ptr.is_null() {
-                return ptr;
-            }
-            align_ptr(ptr, align)
-        }
-    }
-
-    pub unsafe fn reallocate(ptr: *mut u8, _old_size: usize, size: usize, align: usize) -> *mut u8 {
-        if align <= MIN_ALIGN {
-            HeapReAlloc(GetProcessHeap(), 0, ptr as LPVOID, size as SIZE_T) as *mut u8
-        } else {
-            let header = get_header(ptr);
-            let new = HeapReAlloc(GetProcessHeap(),
-                                  0,
-                                  header.0 as LPVOID,
-                                  (size + align) as SIZE_T) as *mut u8;
-            if new.is_null() {
-                return new;
-            }
-            align_ptr(new, align)
-        }
-    }
-
-    pub unsafe fn reallocate_inplace(ptr: *mut u8,
-                                     old_size: usize,
-                                     size: usize,
-                                     align: usize)
-                                     -> usize {
-        if align <= MIN_ALIGN {
-            let new = HeapReAlloc(GetProcessHeap(),
-                                  HEAP_REALLOC_IN_PLACE_ONLY,
-                                  ptr as LPVOID,
-                                  size as SIZE_T) as *mut u8;
-            if new.is_null() {
-                old_size
+                ptr
             } else {
-                size
+                align_ptr(ptr, layout.align())
             }
-        } else {
-            old_size
-        }
+        };
+        ptr as *mut u8
     }
 
-    pub unsafe fn deallocate(ptr: *mut u8, _old_size: usize, align: usize) {
-        if align <= MIN_ALIGN {
-            let err = HeapFree(GetProcessHeap(), 0, ptr as LPVOID);
-            debug_assert!(err != 0);
-        } else {
-            let header = get_header(ptr);
-            let err = HeapFree(GetProcessHeap(), 0, header.0 as LPVOID);
-            debug_assert!(err != 0);
+    #[stable(feature = "alloc_system_type", since = "1.28.0")]
+    unsafe impl GlobalAlloc for System {
+        #[inline]
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            allocate_with_flags(layout, 0)
+        }
+
+        #[inline]
+        unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+            allocate_with_flags(layout, HEAP_ZERO_MEMORY)
+        }
+
+        #[inline]
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+            if layout.align() <= MIN_ALIGN {
+                let err = HeapFree(GetProcessHeap(), 0, ptr as LPVOID);
+                debug_assert!(err != 0, "Failed to free heap memory: {}",
+                              GetLastError());
+            } else {
+                let header = get_header(ptr);
+                let err = HeapFree(GetProcessHeap(), 0, header.0 as LPVOID);
+                debug_assert!(err != 0, "Failed to free heap memory: {}",
+                              GetLastError());
+            }
+        }
+
+        #[inline]
+        unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+            if layout.align() <= MIN_ALIGN {
+                HeapReAlloc(GetProcessHeap(), 0, ptr as LPVOID, new_size) as *mut u8
+            } else {
+                self.realloc_fallback(ptr, layout, new_size)
+            }
         }
     }
+}
 
-    pub fn usable_size(size: usize, _align: usize) -> usize {
-        size
+// This is an implementation of a global allocator on the wasm32 platform when
+// emscripten is not in use. In that situation there's no actual runtime for us
+// to lean on for allocation, so instead we provide our own!
+//
+// The wasm32 instruction set has two instructions for getting the current
+// amount of memory and growing the amount of memory. These instructions are the
+// foundation on which we're able to build an allocator, so we do so! Note that
+// the instructions are also pretty "global" and this is the "global" allocator
+// after all!
+//
+// The current allocator here is the `dlmalloc` crate which we've got included
+// in the rust-lang/rust repository as a submodule. The crate is a port of
+// dlmalloc.c from C to Rust and is basically just so we can have "pure Rust"
+// for now which is currently technically required (can't link with C yet).
+//
+// The crate itself provides a global allocator which on wasm has no
+// synchronization as there are no threads!
+#[cfg(all(target_arch = "wasm32", not(target_os = "emscripten")))]
+mod platform {
+    extern crate dlmalloc;
+
+    use core::alloc::{GlobalAlloc, Layout};
+    use System;
+
+    // No need for synchronization here as wasm is currently single-threaded
+    static mut DLMALLOC: dlmalloc::Dlmalloc = dlmalloc::DLMALLOC_INIT;
+
+    #[stable(feature = "alloc_system_type", since = "1.28.0")]
+    unsafe impl GlobalAlloc for System {
+        #[inline]
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            DLMALLOC.malloc(layout.size(), layout.align())
+        }
+
+        #[inline]
+        unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+            DLMALLOC.calloc(layout.size(), layout.align())
+        }
+
+        #[inline]
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+            DLMALLOC.free(ptr, layout.size(), layout.align())
+        }
+
+        #[inline]
+        unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+            DLMALLOC.realloc(ptr, layout.size(), layout.align(), new_size)
+        }
     }
 }

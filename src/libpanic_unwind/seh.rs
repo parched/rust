@@ -43,7 +43,7 @@
 //!   throwing. Note that throwing an exception into Rust is undefined behavior
 //!   anyway, so this should be fine.
 //! * We've got some data to transmit across the unwinding boundary,
-//!   specifically a `Box<Any + Send>`. Like with Dwarf exceptions
+//!   specifically a `Box<dyn Any + Send>`. Like with Dwarf exceptions
 //!   these two pointers are stored as a payload in the exception itself. On
 //!   MSVC, however, there's no need for an extra heap allocation because the
 //!   call stack is preserved while filter functions are being executed. This
@@ -232,18 +232,18 @@ extern "C" {
 // Again, I'm not entirely sure what this is describing, it just seems to work.
 #[cfg_attr(not(test), lang = "msvc_try_filter")]
 static mut TYPE_DESCRIPTOR1: _TypeDescriptor = _TypeDescriptor {
-    pVFTable: &TYPE_INFO_VTABLE as *const _ as *const _,
+    pVFTable: unsafe { &TYPE_INFO_VTABLE } as *const _ as *const _,
     spare: 0 as *mut _,
     name: imp::NAME1,
 };
 
 static mut TYPE_DESCRIPTOR2: _TypeDescriptor = _TypeDescriptor {
-    pVFTable: &TYPE_INFO_VTABLE as *const _ as *const _,
+    pVFTable: unsafe { &TYPE_INFO_VTABLE } as *const _ as *const _,
     spare: 0 as *mut _,
     name: imp::NAME2,
 };
 
-pub unsafe fn panic(data: Box<Any + Send>) -> u32 {
+pub unsafe fn panic(data: Box<dyn Any + Send>) -> u32 {
     use core::intrinsics::atomic_store;
 
     // _CxxThrowException executes entirely on this stack frame, so there's no
@@ -297,7 +297,7 @@ pub fn payload() -> [u64; 2] {
     [0; 2]
 }
 
-pub unsafe fn cleanup(payload: [u64; 2]) -> Box<Any + Send> {
+pub unsafe fn cleanup(payload: [u64; 2]) -> Box<dyn Any + Send> {
     mem::transmute(raw::TraitObject {
         data: payload[0] as *mut _,
         vtable: payload[1] as *mut _,

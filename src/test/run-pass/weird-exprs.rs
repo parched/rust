@@ -8,6 +8,9 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+// compile-flags: -Z borrowck=compare
+
+#![recursion_limit = "128"]
 
 use std::cell::Cell;
 use std::mem::swap;
@@ -77,6 +80,59 @@ fn angrydome() {
 
 fn evil_lincoln() { let _evil = println!("lincoln"); }
 
+fn dots() {
+    assert_eq!(String::from(".................................................."),
+               format!("{:?}", .. .. .. .. .. .. .. .. .. .. .. .. ..
+                               .. .. .. .. .. .. .. .. .. .. .. ..));
+}
+
+fn u8(u8: u8) {
+    if u8 != 0u8 {
+        assert_eq!(8u8, {
+            macro_rules! u8 {
+                (u8) => {
+                    mod u8 {
+                        pub fn u8<'u8: 'u8 + 'u8>(u8: &'u8 u8) -> &'u8 u8 {
+                            "u8";
+                            u8
+                        }
+                    }
+                };
+            }
+
+            u8!(u8);
+            let &u8: &u8 = u8::u8(&8u8);
+            ::u8(0u8);
+            u8
+        });
+    }
+}
+
+fn fishy() {
+    assert_eq!(String::from("><>"),
+               String::<>::from::<>("><>").chars::<>().rev::<>().collect::<String>());
+}
+
+fn union() {
+    union union<'union> { union: &'union union<'union>, }
+}
+
+fn special_characters() {
+    let val = !((|(..):(_,_),__@_|__)((&*"\\",'🤔')/**/,{})=={&[..=..][..];})//
+    ;
+    assert!(!val);
+}
+
+fn punch_card() -> impl std::fmt::Debug {
+    ..=..=.. ..    .. .. .. ..    .. .. .. ..    .. ..=.. ..
+    ..=.. ..=..    .. .. .. ..    .. .. .. ..    ..=..=..=..
+    ..=.. ..=..    ..=.. ..=..    .. ..=..=..    .. ..=.. ..
+    ..=..=.. ..    ..=.. ..=..    ..=.. .. ..    .. ..=.. ..
+    ..=.. ..=..    ..=.. ..=..    .. ..=.. ..    .. ..=.. ..
+    ..=.. ..=..    ..=.. ..=..    .. .. ..=..    .. ..=.. ..
+    ..=.. ..=..    .. ..=..=..    ..=..=.. ..    .. ..=.. ..
+}
+
 pub fn main() {
     strange();
     funny();
@@ -86,4 +142,10 @@ pub fn main() {
     canttouchthis();
     angrydome();
     evil_lincoln();
+    dots();
+    u8(8u8);
+    fishy();
+    union();
+    special_characters();
+    punch_card();
 }

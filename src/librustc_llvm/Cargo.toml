@@ -7,14 +7,11 @@ build = "build.rs"
 [lib]
 name = "rustc_llvm"
 path = "lib.rs"
-crate-type = ["dylib"]
 
 [features]
 static-libstdcpp = []
-
-[dependencies]
-rustc_bitflags = { path = "../librustc_bitflags" }
+emscripten = []
 
 [build-dependencies]
 build_helper = { path = "../build_helper" }
-gcc = "0.3.27"
+cc = "1.0.1"

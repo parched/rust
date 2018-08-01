@@ -19,7 +19,7 @@ import itertools
 SPEC = re.compile(
     r'^(?:(?P<void>V)|(?P<id>[iusfIUSF])(?:\((?P<start>\d+)-(?P<end>\d+)\)|'
     r'(?P<width>\d+)(:?/(?P<llvm_width>\d+))?)'
-    r'|(?P<reference>\d+))(?P<index>\.\d+)?(?P<modifiers>[vShdnwusfDMC]*)(?P<force_width>x\d+)?'
+    r'|(?P<reference>\d+))(?P<index>\.\d+)?(?P<modifiers>[vShdnwusfDMCNW]*)(?P<force_width>x\d+)?'
     r'(?:(?P<pointer>Pm|Pc)(?P<llvm_pointer>/.*)?|(?P<bitcast>->.*))?$'
 )
 
@@ -119,16 +119,19 @@ class Void(Type):
     def __init__(self):
         Type.__init__(self, 0)
 
-    def compiler_ctor(self):
+    @staticmethod
+    def compiler_ctor():
         return '::VOID'
 
     def compiler_ctor_ref(self):
         return '&' + self.compiler_ctor()
 
-    def rust_name(self):
+    @staticmethod
+    def rust_name():
         return '()'
 
-    def type_info(self, platform_info):
+    @staticmethod
+    def type_info(platform_info):
         return None
 
     def __eq__(self, other):
@@ -243,6 +246,12 @@ class Vector(Type):
             return Vector(self._elem, self._length // 2)
         elif spec == 'd':
             return Vector(self._elem, self._length * 2)
+        elif spec == 'N':
+            elem = self._elem.__class__(self._elem.bitwidth() // 2)
+            return Vector(elem, self._length * 2)
+        elif spec == 'W':
+            elem = self._elem.__class__(self._elem.bitwidth() * 2)
+            return Vector(elem, self._length // 2)
         elif spec.startswith('x'):
             new_bitwidth = int(spec[1:])
             return Vector(self._elem, new_bitwidth // self._elem.bitwidth())
@@ -282,7 +291,7 @@ class Vector(Type):
 
 class Pointer(Type):
     def __init__(self, elem, llvm_elem, const):
-        self._elem = elem;
+        self._elem = elem
         self._llvm_elem = llvm_elem
         self._const = const
         Type.__init__(self, BITWIDTH_POINTER)
@@ -503,7 +512,7 @@ class GenericIntrinsic(object):
             # must be a power of two
             assert width & (width - 1) == 0
             def recur(processed, untouched):
-                if untouched == []:
+                if not untouched:
                     ret = processed[0]
                     args = processed[1:]
                     yield MonomorphicIntrinsic(self._platform, self.intrinsic, width,
@@ -582,7 +591,7 @@ def parse_args():
         The X86 architecture is specified as multiple files (for the different
         instruction sets that x86 supports). To generate the compiler
         definitions one needs to pass the script a "platform information file"
-        (with the -i flag) next to the files of the different intruction sets.
+        (with the -i flag) next to the files of the different instruction sets.
         For example, to generate the X86 compiler-definitions for SSE4.2, just:
 
         python generator.py --format compiler-defs -i x86/info.json sse42.json
@@ -711,6 +720,8 @@ def parse_args():
         - 'd': double the length of the vector (u32x2 -> u32x4)
         - 'n': narrow the element of the vector (u32x4 -> u16x4)
         - 'w': widen the element of the vector (u16x4 -> u32x4)
+        - 'N': half the length of the vector element (u32x4 -> u16x8)
+        - 'W': double the length of the vector element (u16x8 -> u32x4)
         - 'u': force a number (vector or scalar) to be unsigned int (f32x4 -> u32x4)
         - 's': force a number (vector or scalar) to be signed int (u32x4 -> i32x4)
         - 'f': force a number (vector or scalar) to be float (u32x4 -> f32x4)
@@ -756,22 +767,26 @@ class ExternBlock(object):
     def __init__(self):
         pass
 
-    def open(self, platform):
+    @staticmethod
+    def open(platform):
         return 'extern "platform-intrinsic" {'
 
-    def render(self, mono):
+    @staticmethod
+    def render(mono):
         return '    fn {}{}{};'.format(mono.platform_prefix(),
                                        mono.intrinsic_name(),
                                        mono.intrinsic_signature())
 
-    def close(self):
+    @staticmethod
+    def close():
         return '}'
 
 class CompilerDefs(object):
     def __init__(self):
         pass
 
-    def open(self, platform):
+    @staticmethod
+    def open(platform):
         return '''\
 // Copyright 2015 The Rust Project Developers. See the COPYRIGHT
 // file at the top-level directory of this distribution and at
@@ -791,14 +806,12 @@ class CompilerDefs(object):
 use {{Intrinsic, Type}};
 use IntrinsicDef::Named;
 
-// The default inlining settings trigger a pathological behaviour in
-// LLVM, which causes makes compilation very slow. See #28273.
-#[inline(never)]
 pub fn find(name: &str) -> Option<Intrinsic> {{
     if !name.starts_with("{0}") {{ return None }}
     Some(match &name["{0}".len()..] {{'''.format(platform.platform_prefix())
 
-    def render(self, mono):
+    @staticmethod
+    def render(mono):
         return '''\
         "{}" => Intrinsic {{
             inputs: {{ static INPUTS: [&'static Type; {}] = [{}]; &INPUTS }},
@@ -810,7 +823,8 @@ pub fn find(name: &str) -> Option<Intrinsic> {{
                       mono.compiler_ret(),
                       mono.llvm_name())
 
-    def close(self):
+    @staticmethod
+    def close():
         return '''\
         _ => return None,
     })

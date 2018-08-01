@@ -10,6 +10,8 @@
 
 // compile-flags:-C panic=abort -C prefer-dynamic
 // ignore-musl - no dylibs here
+// ignore-cloudabi
+// ignore-emscripten
 // error-pattern:`panic_unwind` is not compiled with this crate's panic strategy
 
 // This is a test where the local crate, compiled with `panic=abort`, links to

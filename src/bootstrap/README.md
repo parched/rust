@@ -4,50 +4,105 @@ This is an in-progress README which is targeted at helping to explain how Rust
 is bootstrapped and in general some of the technical details of the build
 system.
 
-> **Note**: This build system is currently under active development and is not
-> intended to be the primarily used one just yet. The makefiles are currently
-> the ones that are still "guaranteed to work" as much as possible at least.
-
 ## Using rustbuild
 
-When configuring Rust via `./configure`, pass the following to enable building
-via this build system:
+The rustbuild build system has a primary entry point, a top level `x.py` script:
 
 ```
-./configure --enable-rustbuild
-make
+python ./x.py build
 ```
 
-Afterwards the `Makefile` which is generated will have a few commands like
-`make check`, `make tidy`, etc. For finer-grained control, the
-`bootstrap.py` entry point can be used:
+Note that if you're on Unix you should be able to execute the script directly:
 
 ```
-python src/bootstrap/bootstrap.py
+./x.py build
 ```
 
-This accepts a number of options like `--stage` and `--step` which can configure
-what's actually being done.
+The script accepts commands, flags, and arguments to determine what to do:
+
+* `build` - a general purpose command for compiling code. Alone `build` will
+  bootstrap the entire compiler, and otherwise arguments passed indicate what to
+  build. For example:
+
+  ```
+  # build the whole compiler
+  ./x.py build
+
+  # build the stage1 compiler
+  ./x.py build --stage 1
+
+  # build stage0 libstd
+  ./x.py build --stage 0 src/libstd
+
+  # build a particular crate in stage0
+  ./x.py build --stage 0 src/libtest
+  ```
+
+  If files are dirty that would normally be rebuilt from stage 0, that can be
+  overridden using `--keep-stage 0`. Using `--keep-stage n` will skip all steps
+  that belong to stage n or earlier:
+
+  ```
+  # keep old build products for stage 0 and build stage 1
+  ./x.py build --keep-stage 0 --stage 1
+  ```
+
+* `test` - a command for executing unit tests. Like the `build` command this
+  will execute the entire test suite by default, and otherwise it can be used to
+  select which test suite is run:
+
+  ```
+  # run all unit tests
+  ./x.py test
+
+  # execute the run-pass test suite
+  ./x.py test src/test/run-pass
+
+  # execute only some tests in the run-pass test suite
+  ./x.py test src/test/run-pass --test-args substring-of-test-name
+
+  # execute tests in the standard library in stage0
+  ./x.py test --stage 0 src/libstd
+
+  # execute tests in the core and standard library in stage0,
+  # without running doc tests (thus avoid depending on building the compiler)
+  ./x.py test --stage 0 --no-doc src/libcore src/libstd
+
+  # execute all doc tests
+  ./x.py test src/doc
+  ```
+
+* `doc` - a command for building documentation. Like above can take arguments
+  for what to document.
 
 ## Configuring rustbuild
 
-There are currently two primary methods for configuring the rustbuild build
-system. First, the `./configure` options serialized in `config.mk` will be
-parsed and read. That is, if any `./configure` options are passed, they'll be
-handled naturally.
+There are currently two methods for configuring the rustbuild build system.
 
-Next, rustbuild offers a TOML-based configuration system with a `config.toml`
-file in the same location as `config.mk`. An example of this configuration can
-be found at `src/bootstrap/config.toml.example`, and the configuration file
-can also be passed as `--config path/to/config.toml` if the build system is
-being invoked manually (via the python script).
+First, rustbuild offers a TOML-based configuration system with a `config.toml`
+file. An example of this configuration can be found at `config.toml.example`,
+and the configuration file can also be passed as `--config path/to/config.toml`
+if the build system is being invoked manually (via the python script).
+
+Next, the `./configure` options serialized in `config.mk` will be
+parsed and read. That is, if any `./configure` options are passed, they'll be
+handled naturally. `./configure` should almost never be used for local
+installations, and is primarily useful for CI. Prefer to customize behavior
+using `config.toml`.
+
+Finally, rustbuild makes use of the [gcc-rs crate] which has [its own
+method][env-vars] of configuring C compilers and C flags via environment
+variables.
+
+[gcc-rs crate]: https://github.com/alexcrichton/gcc-rs
+[env-vars]: https://github.com/alexcrichton/gcc-rs#external-configuration-via-environment-variables
 
 ## Build stages
 
 The rustbuild build system goes through a few phases to actually build the
 compiler. What actually happens when you invoke rustbuild is:
 
-1. The entry point script, `src/bootstrap/bootstrap.py` is run. This script is
+1. The entry point script, `x.py` is run. This script is
    responsible for downloading the stage0 compiler/Cargo binaries, and it then
    compiles the build system itself (this folder). Finally, it then invokes the
    actual `bootstrap` binary build system.
@@ -62,6 +117,42 @@ compiler. What actually happens when you invoke rustbuild is:
 
 The goal of each stage is to (a) leverage Cargo as much as possible and failing
 that (b) leverage Rust as much as possible!
+
+## Incremental builds
+
+You can configure rustbuild to use incremental compilation. Because
+incremental is new and evolving rapidly, if you want to use it, it is
+recommended that you replace the snapshot with a locally installed
+nightly build of rustc. You will want to keep this up to date.
+
+To follow this course of action, first thing you will want to do is to
+install a nightly, presumably using `rustup`. You will then want to
+configure your directory to use this build, like so:
+
+```
+# configure to use local rust instead of downloading a beta.
+# `--local-rust-root` is optional here. If elided, we will
+# use whatever rustc we find on your PATH.
+> ./configure --local-rust-root=~/.cargo/ --enable-local-rebuild
+```
+
+After that, you can use the `--incremental` flag to actually do
+incremental builds:
+
+```
+> ./x.py build --incremental
+```
+
+The `--incremental` flag will store incremental compilation artifacts
+in `build/<host>/stage0-incremental`. Note that we only use incremental
+compilation for the stage0 -> stage1 compilation -- this is because
+the stage1 compiler is changing, and we don't try to cache and reuse
+incremental artifacts across different versions of the compiler. For
+this reason, `--incremental` defaults to `--stage 1` (though you can
+manually select a higher stage, if you prefer).
+
+You can always drop the `--incremental` to build as normal (but you
+will still be using the local nightly as your bootstrap).
 
 ## Directory Layout
 
@@ -178,8 +269,8 @@ build/
 The current build is unfortunately not quite as simple as `cargo build` in a
 directory, but rather the compiler is split into three different Cargo projects:
 
-* `src/rustc/std_shim` - a project which builds and compiles libstd
-* `src/rustc/test_shim` - a project which builds and compiles libtest
+* `src/libstd` - the standard library
+* `src/libtest` - testing support, depends on libstd
 * `src/rustc` - the actual compiler itself
 
 Each "project" has a corresponding Cargo.lock file with all dependencies, and
@@ -225,16 +316,18 @@ After that, each module in rustbuild should have enough documentation to keep
 you up and running. Some general areas that you may be interested in modifying
 are:
 
-* Adding a new build tool? Take a look at `build/step.rs` for examples of other
-  tools, as well as `build/mod.rs`.
+* Adding a new build tool? Take a look at `bootstrap/tool.rs` for examples of
+  other tools.
 * Adding a new compiler crate? Look no further! Adding crates can be done by
   adding a new directory with `Cargo.toml` followed by configuring all
   `Cargo.toml` files accordingly.
-* Adding a new dependency from crates.io? We're still working on that, so hold
-  off on that for now.
-* Adding a new configuration option? Take a look at `build/config.rs` or perhaps
-  `build/flags.rs` and then modify the build elsewhere to read that option.
-* Adding a sanity check? Take a look at `build/sanity.rs`.
+* Adding a new dependency from crates.io? This should just work inside the
+  compiler artifacts stage (everything other than libtest and libstd).
+* Adding a new configuration option? You'll want to modify `bootstrap/flags.rs`
+  for command line flags and then `bootstrap/config.rs` to copy the flags to the
+  `Config` struct.
+* Adding a sanity check? Take a look at `bootstrap/sanity.rs`.
 
-If you have any questions feel free to reach out on `#rust-internals` on IRC or
-open an issue in the bug tracker!
+If you have any questions feel free to reach out on `#rust-infra` on IRC or ask on
+internals.rust-lang.org. When you encounter bugs, please file issues on the
+rust-lang/rust issue tracker.

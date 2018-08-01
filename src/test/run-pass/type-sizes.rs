@@ -8,6 +8,7 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+#![feature(never_type)]
 
 use std::mem::size_of;
 
@@ -26,8 +27,57 @@ enum e2 {
     a(u32), b
 }
 
+#[repr(C, u8)]
 enum e3 {
     a([u16; 0], u8), b
+}
+
+struct ReorderedStruct {
+    a: u8,
+    b: u16,
+    c: u8
+}
+
+enum ReorderedEnum {
+    A(u8, u16, u8),
+    B(u8, u16, u8),
+}
+
+enum EnumEmpty {}
+
+enum EnumSingle1 {
+    A,
+}
+
+enum EnumSingle2 {
+    A = 42 as isize,
+}
+
+enum EnumSingle3 {
+    A,
+    B(!),
+}
+
+#[repr(u8)]
+enum EnumSingle4 {
+    A,
+}
+
+#[repr(u8)]
+enum EnumSingle5 {
+    A = 42 as u8,
+}
+
+enum EnumWithMaybeUninhabitedVariant<T> {
+    A(&'static ()),
+    B(&'static (), T),
+    C,
+}
+
+enum NicheFilledEnumWithAbsentVariant {
+    A(&'static ()),
+    B((), !),
+    C,
 }
 
 pub fn main() {
@@ -53,4 +103,20 @@ pub fn main() {
     assert_eq!(size_of::<e1>(), 8 as usize);
     assert_eq!(size_of::<e2>(), 8 as usize);
     assert_eq!(size_of::<e3>(), 4 as usize);
+    assert_eq!(size_of::<ReorderedStruct>(), 4);
+    assert_eq!(size_of::<ReorderedEnum>(), 6);
+
+    assert_eq!(size_of::<EnumEmpty>(), 0);
+    assert_eq!(size_of::<EnumSingle1>(), 0);
+    assert_eq!(size_of::<EnumSingle2>(), 0);
+    assert_eq!(size_of::<EnumSingle3>(), 0);
+    assert_eq!(size_of::<EnumSingle4>(), 1);
+    assert_eq!(size_of::<EnumSingle5>(), 1);
+
+    assert_eq!(size_of::<EnumWithMaybeUninhabitedVariant<!>>(),
+               size_of::<EnumWithMaybeUninhabitedVariant<()>>());
+    assert_eq!(size_of::<NicheFilledEnumWithAbsentVariant>(), size_of::<&'static ()>());
+
+    assert_eq!(size_of::<Option<Option<(bool, &())>>>(), size_of::<(bool, &())>());
+    assert_eq!(size_of::<Option<Option<(&(), bool)>>>(), size_of::<(bool, &())>());
 }

@@ -7,14 +7,12 @@
 // <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
-#![feature(associated_consts)]
 
 trait Lattice {
     const BOTTOM: Self;
 }
 
-// FIXME(#33573): this should work without the 'static lifetime bound.
-impl<T: 'static> Lattice for Option<T> {
+impl<T> Lattice for Option<T> {
     const BOTTOM: Option<T> = None;
 }
 

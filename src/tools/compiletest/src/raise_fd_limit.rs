@@ -8,7 +8,7 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-/// darwin_fd_limit exists to work around an issue where launchctl on Mac OS X
+/// darwin_fd_limit exists to work around an issue where launchctl on macOS
 /// defaults the rlimit maxfiles to 256/unlimited. The default soft limit of 256
 /// ends up being far too low for our multithreaded scheduler testing, depending
 /// on the number of cores available.
@@ -34,12 +34,15 @@ pub unsafe fn raise_fd_limit() {
     let mut mib: [libc::c_int; 2] = [CTL_KERN, KERN_MAXFILESPERPROC];
     let mut maxfiles: libc::c_int = 0;
     let mut size: libc::size_t = size_of_val(&maxfiles) as libc::size_t;
-    if libc::sysctl(&mut mib[0],
-                    2,
-                    &mut maxfiles as *mut _ as *mut _,
-                    &mut size,
-                    null_mut(),
-                    0) != 0 {
+    if libc::sysctl(
+        &mut mib[0],
+        2,
+        &mut maxfiles as *mut _ as *mut _,
+        &mut size,
+        null_mut(),
+        0,
+    ) != 0
+    {
         let err = io::Error::last_os_error();
         panic!("raise_fd_limit: error calling sysctl: {}", err);
     }

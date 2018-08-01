@@ -8,62 +8,111 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-//! The Rust compiler.
+//! The "main crate" of the Rust compiler. This crate contains common
+//! type definitions that are used by the other crates in the rustc
+//! "family". Some prominent examples (note that each of these modules
+//! has their own README with further details).
+//!
+//! - **HIR.** The "high-level (H) intermediate representation (IR)" is
+//!   defined in the `hir` module.
+//! - **MIR.** The "mid-level (M) intermediate representation (IR)" is
+//!   defined in the `mir` module. This module contains only the
+//!   *definition* of the MIR; the passes that transform and operate
+//!   on MIR are found in `librustc_mir` crate.
+//! - **Types.** The internal representation of types used in rustc is
+//!   defined in the `ty` module. This includes the **type context**
+//!   (or `tcx`), which is the central context during most of
+//!   compilation, containing the interners and other things.
+//! - **Traits.** Trait resolution is implemented in the `traits` module.
+//! - **Type inference.** The type inference code can be found in the `infer` module;
+//!   this code handles low-level equality and subtyping operations. The
+//!   type check pass in the compiler is found in the `librustc_typeck` crate.
+//!
+//! For more information about how rustc works, see the [rustc guide].
+//!
+//! [rustc guide]: https://rust-lang-nursery.github.io/rustc-guide/
 //!
 //! # Note
 //!
 //! This API is completely unstable and subject to change.
 
-#![crate_name = "rustc"]
-#![unstable(feature = "rustc_private", issue = "27812")]
-#![crate_type = "dylib"]
-#![crate_type = "rlib"]
 #![doc(html_logo_url = "https://www.rust-lang.org/logos/rust-logo-128x128-blk-v2.png",
        html_favicon_url = "https://doc.rust-lang.org/favicon.ico",
        html_root_url = "https://doc.rust-lang.org/nightly/")]
-#![cfg_attr(not(stage0), deny(warnings))]
 
-#![feature(associated_consts)]
 #![feature(box_patterns)]
 #![feature(box_syntax)]
-#![feature(collections)]
-#![feature(conservative_impl_trait)]
 #![feature(const_fn)]
 #![feature(core_intrinsics)]
-#![feature(enumset)]
-#![feature(libc)]
-#![feature(nonzero)]
+#![feature(drain_filter)]
+#![feature(from_ref)]
+#![feature(fs_read_write)]
+#![feature(iterator_find_map)]
+#![cfg_attr(windows, feature(libc))]
+#![feature(macro_vis_matcher)]
+#![feature(never_type)]
+#![feature(exhaustive_patterns)]
+#![feature(extern_types)]
+#![feature(non_exhaustive)]
+#![feature(proc_macro_internals)]
 #![feature(quote)]
+#![feature(optin_builtin_traits)]
+#![feature(refcell_replace_swap)]
 #![feature(rustc_diagnostic_macros)]
-#![feature(rustc_private)]
 #![feature(slice_patterns)]
-#![feature(staged_api)]
-#![feature(question_mark)]
-#![cfg_attr(test, feature(test))]
+#![feature(slice_sort_by_cached_key)]
+#![feature(specialization)]
+#![feature(unboxed_closures)]
+#![feature(trace_macros)]
+#![feature(trusted_len)]
+#![feature(vec_remove_item)]
+#![feature(catch_expr)]
+#![feature(step_trait)]
+#![feature(integer_atomics)]
+#![feature(test)]
+#![feature(in_band_lifetimes)]
+#![feature(macro_at_most_once_rep)]
+#![feature(inclusive_range_methods)]
+#![feature(crate_in_paths)]
+
+#![recursion_limit="512"]
 
 extern crate arena;
+#[macro_use] extern crate bitflags;
 extern crate core;
-extern crate flate;
 extern crate fmt_macros;
 extern crate getopts;
 extern crate graphviz;
+#[macro_use] extern crate lazy_static;
+#[macro_use] extern crate scoped_tls;
+#[cfg(windows)]
 extern crate libc;
-extern crate rbml;
-extern crate rustc_llvm as llvm;
-extern crate rustc_back;
-extern crate rustc_data_structures;
+extern crate polonius_engine;
+extern crate rustc_target;
+#[macro_use] extern crate rustc_data_structures;
 extern crate serialize;
-extern crate collections;
-extern crate rustc_const_math;
+extern crate parking_lot;
 extern crate rustc_errors as errors;
+extern crate rustc_rayon as rayon;
+extern crate rustc_rayon_core as rayon_core;
 #[macro_use] extern crate log;
 #[macro_use] extern crate syntax;
-#[macro_use] extern crate syntax_pos;
-#[macro_use] #[no_link] extern crate rustc_bitflags;
+extern crate syntax_pos;
+extern crate jobserver;
+extern crate proc_macro;
+extern crate chalk_engine;
 
 extern crate serialize as rustc_serialize; // used by deriving
 
-#[cfg(test)]
+extern crate rustc_apfloat;
+extern crate byteorder;
+extern crate backtrace;
+
+// Note that librustc doesn't actually depend on these crates, see the note in
+// `Cargo.toml` for this crate about why these are here.
+#[allow(unused_extern_crates)]
+extern crate flate2;
+#[allow(unused_extern_crates)]
 extern crate test;
 
 #[macro_use]
@@ -76,20 +125,20 @@ pub mod diagnostics;
 pub mod cfg;
 pub mod dep_graph;
 pub mod hir;
+pub mod ich;
 pub mod infer;
 pub mod lint;
 
 pub mod middle {
-    pub mod astconv_util;
-    pub mod expr_use_visitor; // STAGE0: increase glitch immunity
-    pub mod const_val;
-    pub mod const_qualif;
+    pub mod allocator;
+    pub mod borrowck;
+    pub mod expr_use_visitor;
     pub mod cstore;
     pub mod dataflow;
     pub mod dead;
     pub mod dependency_format;
-    pub mod effect;
     pub mod entry;
+    pub mod exported_symbols;
     pub mod free_region;
     pub mod intrinsicck;
     pub mod lang_items;
@@ -104,28 +153,18 @@ pub mod middle {
     pub mod weak_lang_items;
 }
 
-pub mod mir {
-    mod cache;
-    pub mod repr;
-    pub mod tcx;
-    pub mod visit;
-    pub mod transform;
-    pub mod traversal;
-    pub mod mir_map;
-}
-
+pub mod mir;
 pub mod session;
 pub mod traits;
 pub mod ty;
 
 pub mod util {
-    pub use rustc_back::sha2;
-
+    pub mod captures;
     pub mod common;
     pub mod ppaux;
     pub mod nodemap;
-    pub mod num;
     pub mod fs;
+    pub mod time_graph;
 }
 
 // A private module so that macro-expanded idents like

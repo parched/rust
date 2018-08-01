@@ -8,7 +8,8 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-// ignore-emscripten
+// ignore-cloudabi no processes
+// ignore-emscripten no threads
 
 use std::thread;
 use std::env;

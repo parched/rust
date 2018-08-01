@@ -8,129 +8,164 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-use rustc_data_structures::graph;
 use cfg::*;
-use hir::def::Def;
-use hir::pat_util;
-use ty::{self, TyCtxt};
-use syntax::ast;
+use middle::region;
+use rustc_data_structures::graph::implementation as graph;
 use syntax::ptr::P;
+use ty::{self, TyCtxt};
 
 use hir::{self, PatKind};
+use hir::def_id::DefId;
 
 struct CFGBuilder<'a, 'tcx: 'a> {
     tcx: TyCtxt<'a, 'tcx, 'tcx>,
+    owner_def_id: DefId,
+    tables: &'a ty::TypeckTables<'tcx>,
     graph: CFGGraph,
     fn_exit: CFGIndex,
     loop_scopes: Vec<LoopScope>,
+    breakable_block_scopes: Vec<BlockScope>,
+}
+
+#[derive(Copy, Clone)]
+struct BlockScope {
+    block_expr_id: hir::ItemLocalId, // id of breakable block expr node
+    break_index: CFGIndex, // where to go on `break`
 }
 
 #[derive(Copy, Clone)]
 struct LoopScope {
-    loop_id: ast::NodeId,     // id of loop/while node
+    loop_id: hir::ItemLocalId,     // id of loop/while node
     continue_index: CFGIndex, // where to go on a `loop`
-    break_index: CFGIndex,    // where to go on a `break
+    break_index: CFGIndex,    // where to go on a `break`
 }
 
 pub fn construct<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
-                           blk: &hir::Block) -> CFG {
+                           body: &hir::Body) -> CFG {
     let mut graph = graph::Graph::new();
     let entry = graph.add_node(CFGNodeData::Entry);
 
     // `fn_exit` is target of return exprs, which lies somewhere
-    // outside input `blk`. (Distinguishing `fn_exit` and `block_exit`
+    // outside input `body`. (Distinguishing `fn_exit` and `body_exit`
     // also resolves chicken-and-egg problem that arises if you try to
-    // have return exprs jump to `block_exit` during construction.)
+    // have return exprs jump to `body_exit` during construction.)
     let fn_exit = graph.add_node(CFGNodeData::Exit);
-    let block_exit;
+    let body_exit;
+
+    // Find the tables for this body.
+    let owner_def_id = tcx.hir.local_def_id(tcx.hir.body_owner(body.id()));
+    let tables = tcx.typeck_tables_of(owner_def_id);
 
     let mut cfg_builder = CFGBuilder {
-        graph: graph,
-        fn_exit: fn_exit,
-        tcx: tcx,
-        loop_scopes: Vec::new()
+        tcx,
+        owner_def_id,
+        tables,
+        graph,
+        fn_exit,
+        loop_scopes: Vec::new(),
+        breakable_block_scopes: Vec::new(),
     };
-    block_exit = cfg_builder.block(blk, entry);
-    cfg_builder.add_contained_edge(block_exit, fn_exit);
-    let CFGBuilder {graph, ..} = cfg_builder;
-    CFG {graph: graph,
-         entry: entry,
-         exit: fn_exit}
+    body_exit = cfg_builder.expr(&body.value, entry);
+    cfg_builder.add_contained_edge(body_exit, fn_exit);
+    let CFGBuilder { graph, .. } = cfg_builder;
+    CFG {
+        owner_def_id,
+        graph,
+        entry,
+        exit: fn_exit,
+    }
 }
 
 impl<'a, 'tcx> CFGBuilder<'a, 'tcx> {
     fn block(&mut self, blk: &hir::Block, pred: CFGIndex) -> CFGIndex {
-        let mut stmts_exit = pred;
-        for stmt in &blk.stmts {
-            stmts_exit = self.stmt(stmt, stmts_exit);
+        if blk.targeted_by_break {
+            let expr_exit = self.add_ast_node(blk.hir_id.local_id, &[]);
+
+            self.breakable_block_scopes.push(BlockScope {
+                block_expr_id: blk.hir_id.local_id,
+                break_index: expr_exit,
+            });
+
+            let mut stmts_exit = pred;
+            for stmt in &blk.stmts {
+                stmts_exit = self.stmt(stmt, stmts_exit);
+            }
+            let blk_expr_exit = self.opt_expr(&blk.expr, stmts_exit);
+            self.add_contained_edge(blk_expr_exit, expr_exit);
+
+            self.breakable_block_scopes.pop();
+
+            expr_exit
+        } else {
+            let mut stmts_exit = pred;
+            for stmt in &blk.stmts {
+                stmts_exit = self.stmt(stmt, stmts_exit);
+            }
+
+            let expr_exit = self.opt_expr(&blk.expr, stmts_exit);
+
+            self.add_ast_node(blk.hir_id.local_id, &[expr_exit])
         }
-
-        let expr_exit = self.opt_expr(&blk.expr, stmts_exit);
-
-        self.add_ast_node(blk.id, &[expr_exit])
     }
 
     fn stmt(&mut self, stmt: &hir::Stmt, pred: CFGIndex) -> CFGIndex {
+        let hir_id = self.tcx.hir.node_to_hir_id(stmt.node.id());
         match stmt.node {
-            hir::StmtDecl(ref decl, id) => {
+            hir::StmtKind::Decl(ref decl, _) => {
                 let exit = self.decl(&decl, pred);
-                self.add_ast_node(id, &[exit])
+                self.add_ast_node(hir_id.local_id, &[exit])
             }
 
-            hir::StmtExpr(ref expr, id) | hir::StmtSemi(ref expr, id) => {
+            hir::StmtKind::Expr(ref expr, _) |
+            hir::StmtKind::Semi(ref expr, _) => {
                 let exit = self.expr(&expr, pred);
-                self.add_ast_node(id, &[exit])
+                self.add_ast_node(hir_id.local_id, &[exit])
             }
         }
     }
 
     fn decl(&mut self, decl: &hir::Decl, pred: CFGIndex) -> CFGIndex {
         match decl.node {
-            hir::DeclLocal(ref local) => {
+            hir::DeclKind::Local(ref local) => {
                 let init_exit = self.opt_expr(&local.init, pred);
                 self.pat(&local.pat, init_exit)
             }
 
-            hir::DeclItem(_) => {
-                pred
-            }
+            hir::DeclKind::Item(_) => pred,
         }
     }
 
     fn pat(&mut self, pat: &hir::Pat, pred: CFGIndex) -> CFGIndex {
         match pat.node {
-            PatKind::Binding(_, _, None) |
-            PatKind::Path(..) |
+            PatKind::Binding(.., None) |
+            PatKind::Path(_) |
             PatKind::Lit(..) |
             PatKind::Range(..) |
-            PatKind::Wild => {
-                self.add_ast_node(pat.id, &[pred])
-            }
+            PatKind::Wild => self.add_ast_node(pat.hir_id.local_id, &[pred]),
 
             PatKind::Box(ref subpat) |
             PatKind::Ref(ref subpat, _) |
-            PatKind::Binding(_, _, Some(ref subpat)) => {
+            PatKind::Binding(.., Some(ref subpat)) => {
                 let subpat_exit = self.pat(&subpat, pred);
-                self.add_ast_node(pat.id, &[subpat_exit])
+                self.add_ast_node(pat.hir_id.local_id, &[subpat_exit])
             }
 
             PatKind::TupleStruct(_, ref subpats, _) |
             PatKind::Tuple(ref subpats, _) => {
                 let pats_exit = self.pats_all(subpats.iter(), pred);
-                self.add_ast_node(pat.id, &[pats_exit])
+                self.add_ast_node(pat.hir_id.local_id, &[pats_exit])
             }
 
             PatKind::Struct(_, ref subpats, _) => {
-                let pats_exit =
-                    self.pats_all(subpats.iter().map(|f| &f.node.pat), pred);
-                self.add_ast_node(pat.id, &[pats_exit])
+                let pats_exit = self.pats_all(subpats.iter().map(|f| &f.node.pat), pred);
+                self.add_ast_node(pat.hir_id.local_id, &[pats_exit])
             }
 
-            PatKind::Vec(ref pre, ref vec, ref post) => {
+            PatKind::Slice(ref pre, ref vec, ref post) => {
                 let pre_exit = self.pats_all(pre.iter(), pred);
                 let vec_exit = self.pats_all(vec.iter(), pre_exit);
                 let post_exit = self.pats_all(post.iter(), vec_exit);
-                self.add_ast_node(pat.id, &[post_exit])
+                self.add_ast_node(pat.hir_id.local_id, &[post_exit])
             }
         }
     }
@@ -144,12 +179,12 @@ impl<'a, 'tcx> CFGBuilder<'a, 'tcx> {
 
     fn expr(&mut self, expr: &hir::Expr, pred: CFGIndex) -> CFGIndex {
         match expr.node {
-            hir::ExprBlock(ref blk) => {
+            hir::ExprKind::Block(ref blk, _) => {
                 let blk_exit = self.block(&blk, pred);
-                self.add_ast_node(expr.id, &[blk_exit])
+                self.add_ast_node(expr.hir_id.local_id, &[blk_exit])
             }
 
-            hir::ExprIf(ref cond, ref then, None) => {
+            hir::ExprKind::If(ref cond, ref then, None) => {
                 //
                 //     [pred]
                 //       |
@@ -165,11 +200,11 @@ impl<'a, 'tcx> CFGBuilder<'a, 'tcx> {
                 //   [..expr..]
                 //
                 let cond_exit = self.expr(&cond, pred);                // 1
-                let then_exit = self.block(&then, cond_exit);          // 2
-                self.add_ast_node(expr.id, &[cond_exit, then_exit])      // 3,4
+                let then_exit = self.expr(&then, cond_exit);          // 2
+                self.add_ast_node(expr.hir_id.local_id, &[cond_exit, then_exit])      // 3,4
             }
 
-            hir::ExprIf(ref cond, ref then, Some(ref otherwise)) => {
+            hir::ExprKind::If(ref cond, ref then, Some(ref otherwise)) => {
                 //
                 //     [pred]
                 //       |
@@ -185,12 +220,12 @@ impl<'a, 'tcx> CFGBuilder<'a, 'tcx> {
                 //   [..expr..]
                 //
                 let cond_exit = self.expr(&cond, pred);                // 1
-                let then_exit = self.block(&then, cond_exit);          // 2
+                let then_exit = self.expr(&then, cond_exit);          // 2
                 let else_exit = self.expr(&otherwise, cond_exit);      // 3
-                self.add_ast_node(expr.id, &[then_exit, else_exit])      // 4, 5
+                self.add_ast_node(expr.hir_id.local_id, &[then_exit, else_exit])      // 4, 5
             }
 
-            hir::ExprWhile(ref cond, ref body, _) => {
+            hir::ExprKind::While(ref cond, ref body, _) => {
                 //
                 //         [pred]
                 //           |
@@ -208,22 +243,31 @@ impl<'a, 'tcx> CFGBuilder<'a, 'tcx> {
                 // Note that `break` and `continue` statements
                 // may cause additional edges.
 
-                // Is the condition considered part of the loop?
                 let loopback = self.add_dummy_node(&[pred]);              // 1
-                let cond_exit = self.expr(&cond, loopback);             // 2
-                let expr_exit = self.add_ast_node(expr.id, &[cond_exit]); // 3
+
+                // Create expr_exit without pred (cond_exit)
+                let expr_exit = self.add_ast_node(expr.hir_id.local_id, &[]);         // 3
+
+                // The LoopScope needs to be on the loop_scopes stack while evaluating the
+                // condition and the body of the loop (both can break out of the loop)
                 self.loop_scopes.push(LoopScope {
-                    loop_id: expr.id,
+                    loop_id: expr.hir_id.local_id,
                     continue_index: loopback,
                     break_index: expr_exit
                 });
+
+                let cond_exit = self.expr(&cond, loopback);             // 2
+
+                // Add pred (cond_exit) to expr_exit
+                self.add_contained_edge(cond_exit, expr_exit);
+
                 let body_exit = self.block(&body, cond_exit);          // 4
                 self.add_contained_edge(body_exit, loopback);            // 5
                 self.loop_scopes.pop();
                 expr_exit
             }
 
-            hir::ExprLoop(ref body, _) => {
+            hir::ExprKind::Loop(ref body, _, _) => {
                 //
                 //     [pred]
                 //       |
@@ -239,9 +283,9 @@ impl<'a, 'tcx> CFGBuilder<'a, 'tcx> {
                 // may cause additional edges.
 
                 let loopback = self.add_dummy_node(&[pred]);              // 1
-                let expr_exit = self.add_ast_node(expr.id, &[]);          // 2
+                let expr_exit = self.add_ast_node(expr.hir_id.local_id, &[]);          // 2
                 self.loop_scopes.push(LoopScope {
-                    loop_id: expr.id,
+                    loop_id: expr.hir_id.local_id,
                     continue_index: loopback,
                     break_index: expr_exit,
                 });
@@ -251,11 +295,11 @@ impl<'a, 'tcx> CFGBuilder<'a, 'tcx> {
                 expr_exit
             }
 
-            hir::ExprMatch(ref discr, ref arms, _) => {
-                self.match_(expr.id, &discr, &arms, pred)
+            hir::ExprKind::Match(ref discr, ref arms, _) => {
+                self.match_(expr.hir_id.local_id, &discr, &arms, pred)
             }
 
-            hir::ExprBinary(op, ref l, ref r) if op.node.is_lazy() => {
+            hir::ExprKind::Binary(op, ref l, ref r) if op.node.is_lazy() => {
                 //
                 //     [pred]
                 //       |
@@ -272,95 +316,93 @@ impl<'a, 'tcx> CFGBuilder<'a, 'tcx> {
                 //
                 let l_exit = self.expr(&l, pred);                      // 1
                 let r_exit = self.expr(&r, l_exit);                    // 2
-                self.add_ast_node(expr.id, &[l_exit, r_exit])            // 3,4
+                self.add_ast_node(expr.hir_id.local_id, &[l_exit, r_exit])            // 3,4
             }
 
-            hir::ExprRet(ref v) => {
+            hir::ExprKind::Ret(ref v) => {
                 let v_exit = self.opt_expr(v, pred);
-                let b = self.add_ast_node(expr.id, &[v_exit]);
+                let b = self.add_ast_node(expr.hir_id.local_id, &[v_exit]);
                 self.add_returning_edge(expr, b);
                 self.add_unreachable_node()
             }
 
-            hir::ExprBreak(label) => {
-                let loop_scope = self.find_scope(expr, label.map(|l| l.node));
-                let b = self.add_ast_node(expr.id, &[pred]);
-                self.add_exiting_edge(expr, b,
-                                      loop_scope, loop_scope.break_index);
+            hir::ExprKind::Break(destination, ref opt_expr) => {
+                let v = self.opt_expr(opt_expr, pred);
+                let (target_scope, break_dest) =
+                    self.find_scope_edge(expr, destination, ScopeCfKind::Break);
+                let b = self.add_ast_node(expr.hir_id.local_id, &[v]);
+                self.add_exiting_edge(expr, b, target_scope, break_dest);
                 self.add_unreachable_node()
             }
 
-            hir::ExprAgain(label) => {
-                let loop_scope = self.find_scope(expr, label.map(|l| l.node));
-                let a = self.add_ast_node(expr.id, &[pred]);
-                self.add_exiting_edge(expr, a,
-                                      loop_scope, loop_scope.continue_index);
+            hir::ExprKind::Continue(destination) => {
+                let (target_scope, cont_dest) =
+                    self.find_scope_edge(expr, destination, ScopeCfKind::Continue);
+                let a = self.add_ast_node(expr.hir_id.local_id, &[pred]);
+                self.add_exiting_edge(expr, a, target_scope, cont_dest);
                 self.add_unreachable_node()
             }
 
-            hir::ExprVec(ref elems) => {
-                self.straightline(expr, pred, elems.iter().map(|e| &**e))
+            hir::ExprKind::Array(ref elems) => {
+                self.straightline(expr, pred, elems.iter().map(|e| &*e))
             }
 
-            hir::ExprCall(ref func, ref args) => {
-                self.call(expr, pred, &func, args.iter().map(|e| &**e))
+            hir::ExprKind::Call(ref func, ref args) => {
+                self.call(expr, pred, &func, args.iter().map(|e| &*e))
             }
 
-            hir::ExprMethodCall(_, _, ref args) => {
-                self.call(expr, pred, &args[0], args[1..].iter().map(|e| &**e))
+            hir::ExprKind::MethodCall(.., ref args) => {
+                self.call(expr, pred, &args[0], args[1..].iter().map(|e| &*e))
             }
 
-            hir::ExprIndex(ref l, ref r) |
-            hir::ExprBinary(_, ref l, ref r) if self.tcx.is_method_call(expr.id) => {
+            hir::ExprKind::Index(ref l, ref r) |
+            hir::ExprKind::Binary(_, ref l, ref r) if self.tables.is_method_call(expr) => {
                 self.call(expr, pred, &l, Some(&**r).into_iter())
             }
 
-            hir::ExprUnary(_, ref e) if self.tcx.is_method_call(expr.id) => {
+            hir::ExprKind::Unary(_, ref e) if self.tables.is_method_call(expr) => {
                 self.call(expr, pred, &e, None::<hir::Expr>.iter())
             }
 
-            hir::ExprTup(ref exprs) => {
-                self.straightline(expr, pred, exprs.iter().map(|e| &**e))
+            hir::ExprKind::Tup(ref exprs) => {
+                self.straightline(expr, pred, exprs.iter().map(|e| &*e))
             }
 
-            hir::ExprStruct(_, ref fields, ref base) => {
+            hir::ExprKind::Struct(_, ref fields, ref base) => {
                 let field_cfg = self.straightline(expr, pred, fields.iter().map(|f| &*f.expr));
                 self.opt_expr(base, field_cfg)
             }
 
-            hir::ExprRepeat(ref elem, ref count) => {
-                self.straightline(expr, pred, [elem, count].iter().map(|&e| &**e))
-            }
-
-            hir::ExprAssign(ref l, ref r) |
-            hir::ExprAssignOp(_, ref l, ref r) => {
+            hir::ExprKind::Assign(ref l, ref r) |
+            hir::ExprKind::AssignOp(_, ref l, ref r) => {
                 self.straightline(expr, pred, [r, l].iter().map(|&e| &**e))
             }
 
-            hir::ExprIndex(ref l, ref r) |
-            hir::ExprBinary(_, ref l, ref r) => { // NB: && and || handled earlier
+            hir::ExprKind::Index(ref l, ref r) |
+            hir::ExprKind::Binary(_, ref l, ref r) => { // NB: && and || handled earlier
                 self.straightline(expr, pred, [l, r].iter().map(|&e| &**e))
             }
 
-            hir::ExprBox(ref e) |
-            hir::ExprAddrOf(_, ref e) |
-            hir::ExprCast(ref e, _) |
-            hir::ExprType(ref e, _) |
-            hir::ExprUnary(_, ref e) |
-            hir::ExprField(ref e, _) |
-            hir::ExprTupField(ref e, _) => {
+            hir::ExprKind::Box(ref e) |
+            hir::ExprKind::AddrOf(_, ref e) |
+            hir::ExprKind::Cast(ref e, _) |
+            hir::ExprKind::Type(ref e, _) |
+            hir::ExprKind::Unary(_, ref e) |
+            hir::ExprKind::Field(ref e, _) |
+            hir::ExprKind::Yield(ref e) |
+            hir::ExprKind::Repeat(ref e, _) => {
                 self.straightline(expr, pred, Some(&**e).into_iter())
             }
 
-            hir::ExprInlineAsm(_, ref outputs, ref inputs) => {
-                let post_outputs = self.exprs(outputs.iter().map(|e| &**e), pred);
-                let post_inputs = self.exprs(inputs.iter().map(|e| &**e), post_outputs);
-                self.add_ast_node(expr.id, &[post_inputs])
+            hir::ExprKind::InlineAsm(_, ref outputs, ref inputs) => {
+                let post_outputs = self.exprs(outputs.iter().map(|e| &*e), pred);
+                let post_inputs = self.exprs(inputs.iter().map(|e| &*e), post_outputs);
+                self.add_ast_node(expr.hir_id.local_id, &[post_inputs])
             }
 
-            hir::ExprClosure(..) |
-            hir::ExprLit(..) |
-            hir::ExprPath(..) => {
+            hir::ExprKind::Closure(..) |
+            hir::ExprKind::Lit(..) |
+            hir::ExprKind::Path(_) => {
                 self.straightline(expr, pred, None::<hir::Expr>.iter())
             }
         }
@@ -371,16 +413,10 @@ impl<'a, 'tcx> CFGBuilder<'a, 'tcx> {
             pred: CFGIndex,
             func_or_rcvr: &hir::Expr,
             args: I) -> CFGIndex {
-        let method_call = ty::MethodCall::expr(call_expr.id);
-        let fn_ty = match self.tcx.tables.borrow().method_map.get(&method_call) {
-            Some(method) => method.ty,
-            None => self.tcx.expr_ty_adjusted(func_or_rcvr)
-        };
-
         let func_or_rcvr_exit = self.expr(func_or_rcvr, pred);
         let ret = self.straightline(call_expr, func_or_rcvr_exit, args);
         // FIXME(canndrew): This is_never should probably be an is_uninhabited.
-        if fn_ty.fn_ret().0.is_never() {
+        if self.tables.expr_ty(call_expr).is_never() {
             self.add_unreachable_node()
         } else {
             ret
@@ -408,21 +444,21 @@ impl<'a, 'tcx> CFGBuilder<'a, 'tcx> {
         //! Handles case of an expression that evaluates `subexprs` in order
 
         let subexprs_exit = self.exprs(subexprs, pred);
-        self.add_ast_node(expr.id, &[subexprs_exit])
+        self.add_ast_node(expr.hir_id.local_id, &[subexprs_exit])
     }
 
-    fn match_(&mut self, id: ast::NodeId, discr: &hir::Expr,
+    fn match_(&mut self, id: hir::ItemLocalId, discr: &hir::Expr,
               arms: &[hir::Arm], pred: CFGIndex) -> CFGIndex {
         // The CFG for match expression is quite complex, so no ASCII
         // art for it (yet).
         //
-        // The CFG generated below matches roughly what trans puts
-        // out. Each pattern and guard is visited in parallel, with
+        // The CFG generated below matches roughly what MIR contains.
+        // Each pattern and guard is visited in parallel, with
         // arms containing multiple patterns generating multiple nodes
         // for the same guard expression. The guard expressions chain
         // into each other from top to bottom, with a specific
         // exception to allow some additional valid programs
-        // (explained below). Trans differs slightly in that the
+        // (explained below). MIR differs slightly in that the
         // pattern matching may continue after a guard but the visible
         // behaviour should be the same.
         //
@@ -436,8 +472,6 @@ impl<'a, 'tcx> CFGBuilder<'a, 'tcx> {
 
         // Keep track of the previous guard expressions
         let mut prev_guards = Vec::new();
-        // Track if the previous pattern contained bindings or wildcards
-        let mut prev_has_bindings = false;
 
         for arm in arms {
             // Add an exit node for when we've visited all the
@@ -456,39 +490,15 @@ impl<'a, 'tcx> CFGBuilder<'a, 'tcx> {
                     // Visit the guard expression
                     let guard_exit = self.expr(&guard, guard_start);
 
-                    let this_has_bindings = pat_util::pat_contains_bindings_or_wild(&pat);
-
-                    // If both this pattern and the previous pattern
-                    // were free of bindings, they must consist only
-                    // of "constant" patterns. Note we cannot match an
-                    // all-constant pattern, fail the guard, and then
-                    // match *another* all-constant pattern. This is
-                    // because if the previous pattern matches, then
-                    // we *cannot* match this one, unless all the
-                    // constants are the same (which is rejected by
-                    // `check_match`).
-                    //
-                    // We can use this to be smarter about the flow
-                    // along guards. If the previous pattern matched,
-                    // then we know we will not visit the guard in
-                    // this one (whether or not the guard succeeded),
-                    // if the previous pattern failed, then we know
-                    // the guard for that pattern will not have been
-                    // visited. Thus, it is not possible to visit both
-                    // the previous guard and the current one when
-                    // both patterns consist only of constant
-                    // sub-patterns.
-                    //
-                    // However, if the above does not hold, then all
-                    // previous guards need to be wired to visit the
-                    // current guard pattern.
-                    if prev_has_bindings || this_has_bindings {
-                        while let Some(prev) = prev_guards.pop() {
-                            self.add_contained_edge(prev, guard_start);
-                        }
+                    // #47295: We used to have very special case code
+                    // here for when a pair of arms are both formed
+                    // solely from constants, and if so, not add these
+                    // edges.  But this was not actually sound without
+                    // other constraints that we stopped enforcing at
+                    // some point.
+                    while let Some(prev) = prev_guards.pop() {
+                        self.add_contained_edge(prev, guard_start);
                     }
-
-                    prev_has_bindings = this_has_bindings;
 
                     // Push the guard onto the list of previous guards
                     prev_guards.push(guard_exit);
@@ -516,8 +526,7 @@ impl<'a, 'tcx> CFGBuilder<'a, 'tcx> {
         self.add_node(CFGNodeData::Dummy, preds)
     }
 
-    fn add_ast_node(&mut self, id: ast::NodeId, preds: &[CFGIndex]) -> CFGIndex {
-        assert!(id != ast::DUMMY_NODE_ID);
+    fn add_ast_node(&mut self, id: hir::ItemLocalId, preds: &[CFGIndex]) -> CFGIndex {
         self.add_node(CFGNodeData::AST(id), preds)
     }
 
@@ -536,21 +545,21 @@ impl<'a, 'tcx> CFGBuilder<'a, 'tcx> {
     fn add_contained_edge(&mut self,
                           source: CFGIndex,
                           target: CFGIndex) {
-        let data = CFGEdgeData {exiting_scopes: vec!() };
+        let data = CFGEdgeData {exiting_scopes: vec![] };
         self.graph.add_edge(source, target, data);
     }
 
     fn add_exiting_edge(&mut self,
                         from_expr: &hir::Expr,
                         from_index: CFGIndex,
-                        to_loop: LoopScope,
+                        target_scope: region::Scope,
                         to_index: CFGIndex) {
-        let mut data = CFGEdgeData {exiting_scopes: vec!() };
-        let mut scope = self.tcx.region_maps.node_extent(from_expr.id);
-        let target_scope = self.tcx.region_maps.node_extent(to_loop.loop_id);
+        let mut data = CFGEdgeData { exiting_scopes: vec![] };
+        let mut scope = region::Scope::Node(from_expr.hir_id.local_id);
+        let region_scope_tree = self.tcx.region_scope_tree(self.owner_def_id);
         while scope != target_scope {
-            data.exiting_scopes.push(scope.node_id(&self.tcx.region_maps));
-            scope = self.tcx.region_maps.encl_scope(scope);
+            data.exiting_scopes.push(scope.item_local_id());
+            scope = region_scope_tree.encl_scope(scope);
         }
         self.graph.add_edge(from_index, to_index, data);
     }
@@ -558,35 +567,49 @@ impl<'a, 'tcx> CFGBuilder<'a, 'tcx> {
     fn add_returning_edge(&mut self,
                           _from_expr: &hir::Expr,
                           from_index: CFGIndex) {
-        let mut data = CFGEdgeData {
-            exiting_scopes: vec!(),
+        let data = CFGEdgeData {
+            exiting_scopes: self.loop_scopes.iter()
+                                            .rev()
+                                            .map(|&LoopScope { loop_id: id, .. }| id)
+                                            .collect()
         };
-        for &LoopScope { loop_id: id, .. } in self.loop_scopes.iter().rev() {
-            data.exiting_scopes.push(id);
-        }
         self.graph.add_edge(from_index, self.fn_exit, data);
     }
 
-    fn find_scope(&self,
+    fn find_scope_edge(&self,
                   expr: &hir::Expr,
-                  label: Option<ast::Name>) -> LoopScope {
-        if label.is_none() {
-            return *self.loop_scopes.last().unwrap();
-        }
+                  destination: hir::Destination,
+                  scope_cf_kind: ScopeCfKind) -> (region::Scope, CFGIndex) {
 
-        match self.tcx.expect_def(expr.id) {
-            Def::Label(loop_id) => {
-                for l in &self.loop_scopes {
-                    if l.loop_id == loop_id {
-                        return *l;
+        match destination.target_id {
+            Ok(loop_id) => {
+                for b in &self.breakable_block_scopes {
+                    if b.block_expr_id == self.tcx.hir.node_to_hir_id(loop_id).local_id {
+                        let scope_id = self.tcx.hir.node_to_hir_id(loop_id).local_id;
+                        return (region::Scope::Node(scope_id), match scope_cf_kind {
+                            ScopeCfKind::Break => b.break_index,
+                            ScopeCfKind::Continue => bug!("can't continue to block"),
+                        });
                     }
                 }
-                span_bug!(expr.span, "no loop scope for id {}", loop_id);
+                for l in &self.loop_scopes {
+                    if l.loop_id == self.tcx.hir.node_to_hir_id(loop_id).local_id {
+                        let scope_id = self.tcx.hir.node_to_hir_id(loop_id).local_id;
+                        return (region::Scope::Node(scope_id), match scope_cf_kind {
+                            ScopeCfKind::Break => l.break_index,
+                            ScopeCfKind::Continue => l.continue_index,
+                        });
+                    }
+                }
+                span_bug!(expr.span, "no scope for id {}", loop_id);
             }
-
-            r => {
-                span_bug!(expr.span, "bad entry `{:?}` in def_map for label", r);
-            }
+            Err(err) => span_bug!(expr.span, "scope error: {}",  err),
         }
     }
+}
+
+#[derive(Copy, Clone, Eq, PartialEq)]
+enum ScopeCfKind {
+    Break,
+    Continue,
 }

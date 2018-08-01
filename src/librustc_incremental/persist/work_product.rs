@@ -11,30 +11,33 @@
 //! This module contains files for saving intermediate work-products.
 
 use persist::fs::*;
-use rustc::dep_graph::{WorkProduct, WorkProductId};
+use rustc::dep_graph::{WorkProduct, WorkProductId, WorkProductFileKind};
 use rustc::session::Session;
-use rustc::session::config::OutputType;
 use rustc::util::fs::link_or_copy;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::fs as std_fs;
 
-pub fn save_trans_partition(sess: &Session,
-                            cgu_name: &str,
-                            partition_hash: u64,
-                            files: &[(OutputType, PathBuf)]) {
-    debug!("save_trans_partition({:?},{},{:?})",
+pub fn copy_cgu_workproducts_to_incr_comp_cache_dir(
+    sess: &Session,
+    cgu_name: &str,
+    files: &[(WorkProductFileKind, PathBuf)]
+) -> Option<(WorkProductId, WorkProduct)> {
+    debug!("copy_cgu_workproducts_to_incr_comp_cache_dir({:?},{:?})",
            cgu_name,
-           partition_hash,
            files);
     if sess.opts.incremental.is_none() {
-        return;
+        return None
     }
-    let work_product_id = Arc::new(WorkProductId(cgu_name.to_string()));
 
     let saved_files: Option<Vec<_>> =
         files.iter()
              .map(|&(kind, ref path)| {
-                 let file_name = format!("cgu-{}.{}", cgu_name, kind.extension());
+                 let extension = match kind {
+                     WorkProductFileKind::Object => "o",
+                     WorkProductFileKind::Bytecode => "bc",
+                     WorkProductFileKind::BytecodeCompressed => "bc.z",
+                 };
+                 let file_name = format!("{}.{}", cgu_name, extension);
                  let path_in_incr_dir = in_incr_comp_dir_sess(sess, &file_name);
                  match link_or_copy(path, &path_in_incr_dir) {
                      Ok(_) => Some((kind, file_name)),
@@ -50,14 +53,29 @@ pub fn save_trans_partition(sess: &Session,
              })
              .collect();
     let saved_files = match saved_files {
+        None => return None,
         Some(v) => v,
-        None => return,
     };
 
     let work_product = WorkProduct {
-        input_hash: partition_hash,
-        saved_files: saved_files,
+        cgu_name: cgu_name.to_string(),
+        saved_files,
     };
 
-    sess.dep_graph.insert_work_product(&work_product_id, work_product);
+    let work_product_id = WorkProductId::from_cgu_name(cgu_name);
+    Some((work_product_id, work_product))
+}
+
+pub fn delete_workproduct_files(sess: &Session, work_product: &WorkProduct) {
+    for &(_, ref file_name) in &work_product.saved_files {
+        let path = in_incr_comp_dir_sess(sess, file_name);
+        match std_fs::remove_file(&path) {
+            Ok(()) => { }
+            Err(err) => {
+                sess.warn(
+                    &format!("file-system error deleting outdated file `{}`: {}",
+                             path.display(), err));
+            }
+        }
+    }
 }

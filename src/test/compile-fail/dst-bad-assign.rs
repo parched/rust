@@ -41,12 +41,11 @@ impl ToBar for Bar1 {
 pub fn main() {
     // Assignment.
     let f5: &mut Fat<ToBar> = &mut Fat { f1: 5, f2: "some str", ptr: Bar1 {f :42} };
-    // FIXME (#22405): Replace `Box::new` with `box` here when/if possible.
     let z: Box<ToBar> = Box::new(Bar1 {f: 36});
     f5.ptr = Bar1 {f: 36};
     //~^ ERROR mismatched types
-    //~| expected type `ToBar`
+    //~| expected type `dyn ToBar`
     //~| found type `Bar1`
     //~| expected trait ToBar, found struct `Bar1`
-    //~| ERROR `ToBar: std::marker::Sized` is not satisfied
+    //~| ERROR the size for values of type
 }

@@ -95,7 +95,7 @@ impl TocBuilder {
     /// self.top_level, D is in C.children, and C, E, F, G are in
     /// self.chain.
     ///
-    /// When we attempt to push H, we realise that first G is not the
+    /// When we attempt to push H, we realize that first G is not the
     /// parent (level is too high) so it is popped from chain and put
     /// into F.children, then F isn't the parent (level is equal, aka
     /// sibling), so it's also popped and put into E.children.
@@ -157,14 +157,14 @@ impl TocBuilder {
                 sec_number.push_str("0.");
             }
             let number = toc.count_entries_with_level(level);
-            sec_number.push_str(&format!("{}", number + 1))
+            sec_number.push_str(&(number + 1).to_string())
         }
 
         self.chain.push(TocEntry {
-            level: level,
-            name: name,
-            sec_number: sec_number,
-            id: id,
+            level,
+            name,
+            sec_number,
+            id,
             children: Toc { entries: Vec::new() }
         });
 
@@ -247,7 +247,7 @@ mod tests {
         macro_rules! toc {
             ($(($level: expr, $name: expr, $(($sub: tt))* )),*) => {
                 Toc {
-                    entries: vec!(
+                    entries: vec![
                         $(
                             TocEntry {
                                 level: $level,
@@ -257,7 +257,7 @@ mod tests {
                                 children: toc!($($sub),*)
                             }
                             ),*
-                        )
+                        ]
                 }
             }
         }

@@ -8,25 +8,17 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-// ignore-tidy-linelength
-
-#![feature(untagged_unions)]
-
 #[derive(Clone, Copy)]
 struct S {
     a: u8,
     b: u16,
 }
 
+#[derive(Clone, Copy)]
 union U {
     s: S,
     c: u32,
 }
-
-impl Clone for U {
-    fn clone(&self) -> Self { *self }
-}
-impl Copy for U {}
 
 fn main() {
     unsafe {

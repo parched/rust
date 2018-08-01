@@ -52,7 +52,7 @@ pub struct DataflowLabeller<'a, 'tcx: 'a> {
 impl<'a, 'tcx> DataflowLabeller<'a, 'tcx> {
     fn dataflow_for(&self, e: EntryOrExit, n: &Node<'a>) -> String {
         let id = n.1.data.id();
-        debug!("dataflow_for({:?}, id={}) {:?}", e, id, self.variants);
+        debug!("dataflow_for({:?}, id={:?}) {:?}", e, id, self.variants);
         let mut sets = "".to_string();
         let mut seen_one = false;
         for &variant in &self.variants {
@@ -88,7 +88,7 @@ impl<'a, 'tcx> DataflowLabeller<'a, 'tcx> {
                 set.push_str(", ");
             }
             let loan_str = self.borrowck_ctxt.loan_path_to_string(&lp);
-            set.push_str(&loan_str[..]);
+            set.push_str(&loan_str);
             saw_some = true;
             true
         });

@@ -12,7 +12,7 @@
 
 use build::Builder;
 use hair::*;
-use rustc::mir::repr::*;
+use rustc::mir::*;
 
 impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
     /// Compile `expr`, yielding a compile-time constant. Assumes that
@@ -26,9 +26,10 @@ impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
 
     fn expr_as_constant(&mut self, expr: Expr<'tcx>) -> Constant<'tcx> {
         let this = self;
-        let Expr { ty, temp_lifetime: _, span, kind } = expr;
+        let Expr { ty, temp_lifetime: _, span, kind }
+            = expr;
         match kind {
-            ExprKind::Scope { extent: _, value } =>
+            ExprKind::Scope { region_scope: _, lint_level: _, value } =>
                 this.as_constant(value),
             ExprKind::Literal { literal } =>
                 Constant { span: span, ty: ty, literal: literal },

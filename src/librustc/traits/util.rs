@@ -9,10 +9,12 @@
 // except according to those terms.
 
 use hir::def_id::DefId;
-use ty::subst::{Subst, Substs};
+use ty::subst::{Kind, Subst, Substs};
 use ty::{self, Ty, TyCtxt, ToPredicate, ToPolyTraitRef};
-use util::common::ErrorReported;
-use util::nodemap::FnvHashSet;
+use ty::outlives::Component;
+use util::nodemap::FxHashSet;
+use hir::{self};
+use traits::specialize::specialization_graph::NodeItem;
 
 use super::{Obligation, ObligationCause, PredicateObligation, SelectionContext, Normalized};
 
@@ -22,9 +24,6 @@ fn anonymize_predicate<'a, 'gcx, 'tcx>(tcx: TyCtxt<'a, 'gcx, 'tcx>,
     match *pred {
         ty::Predicate::Trait(ref data) =>
             ty::Predicate::Trait(tcx.anonymize_late_bound_regions(data)),
-
-        ty::Predicate::Equate(ref data) =>
-            ty::Predicate::Equate(tcx.anonymize_late_bound_regions(data)),
 
         ty::Predicate::RegionOutlives(ref data) =>
             ty::Predicate::RegionOutlives(tcx.anonymize_late_bound_regions(data)),
@@ -41,20 +40,26 @@ fn anonymize_predicate<'a, 'gcx, 'tcx>(tcx: TyCtxt<'a, 'gcx, 'tcx>,
         ty::Predicate::ObjectSafe(data) =>
             ty::Predicate::ObjectSafe(data),
 
-        ty::Predicate::ClosureKind(closure_def_id, kind) =>
-            ty::Predicate::ClosureKind(closure_def_id, kind)
+        ty::Predicate::ClosureKind(closure_def_id, closure_substs, kind) =>
+            ty::Predicate::ClosureKind(closure_def_id, closure_substs, kind),
+
+        ty::Predicate::Subtype(ref data) =>
+            ty::Predicate::Subtype(tcx.anonymize_late_bound_regions(data)),
+
+        ty::Predicate::ConstEvaluatable(def_id, substs) =>
+            ty::Predicate::ConstEvaluatable(def_id, substs),
     }
 }
 
 
 struct PredicateSet<'a, 'gcx: 'a+'tcx, 'tcx: 'a> {
     tcx: TyCtxt<'a, 'gcx, 'tcx>,
-    set: FnvHashSet<ty::Predicate<'tcx>>,
+    set: FxHashSet<ty::Predicate<'tcx>>,
 }
 
 impl<'a, 'gcx, 'tcx> PredicateSet<'a, 'gcx, 'tcx> {
     fn new(tcx: TyCtxt<'a, 'gcx, 'tcx>) -> PredicateSet<'a, 'gcx, 'tcx> {
-        PredicateSet { tcx: tcx, set: FnvHashSet() }
+        PredicateSet { tcx: tcx, set: FxHashSet() }
     }
 
     fn insert(&mut self, pred: &ty::Predicate<'tcx>) -> bool {
@@ -127,7 +132,7 @@ impl<'cx, 'gcx, 'tcx> Elaborator<'cx, 'gcx, 'tcx> {
         match *predicate {
             ty::Predicate::Trait(ref data) => {
                 // Predicates declared on the trait.
-                let predicates = tcx.lookup_super_predicates(data.def_id());
+                let predicates = tcx.super_predicates_of(data.def_id());
 
                 let mut predicates: Vec<_> =
                     predicates.predicates
@@ -155,10 +160,9 @@ impl<'cx, 'gcx, 'tcx> Elaborator<'cx, 'gcx, 'tcx> {
                 // Currently, we do not elaborate object-safe
                 // predicates.
             }
-            ty::Predicate::Equate(..) => {
-                // Currently, we do not "elaborate" predicates like
-                // `X == Y`, though conceivably we might. For example,
-                // `&X == &Y` implies that `X == Y`.
+            ty::Predicate::Subtype(..) => {
+                // Currently, we do not "elaborate" predicates like `X
+                // <: Y`, though conceivably we might.
             }
             ty::Predicate::Projection(..) => {
                 // Nothing to elaborate in a projection predicate.
@@ -166,27 +170,67 @@ impl<'cx, 'gcx, 'tcx> Elaborator<'cx, 'gcx, 'tcx> {
             ty::Predicate::ClosureKind(..) => {
                 // Nothing to elaborate when waiting for a closure's kind to be inferred.
             }
-            ty::Predicate::RegionOutlives(..) |
-            ty::Predicate::TypeOutlives(..) => {
-                // Currently, we do not "elaborate" predicates like
-                // `'a : 'b` or `T : 'a`.  We could conceivably do
-                // more here.  For example,
+            ty::Predicate::ConstEvaluatable(..) => {
+                // Currently, we do not elaborate const-evaluatable
+                // predicates.
+            }
+
+            ty::Predicate::RegionOutlives(..) => {
+                // Nothing to elaborate from `'a: 'b`.
+            }
+
+            ty::Predicate::TypeOutlives(ref data) => {
+                // We know that `T: 'a` for some type `T`. We can
+                // often elaborate this. For example, if we know that
+                // `[U]: 'a`, that implies that `U: 'a`. Similarly, if
+                // we know `&'a U: 'b`, then we know that `'a: 'b` and
+                // `U: 'b`.
                 //
-                //     &'a int : 'b
-                //
-                // implies that
-                //
-                //     'a : 'b
-                //
-                // and we could get even more if we took WF
-                // constraints into account. For example,
-                //
-                //     &'a &'b int : 'c
-                //
-                // implies that
-                //
-                //     'b : 'a
-                //     'a : 'c
+                // We can basically ignore bound regions here. So for
+                // example `for<'c> Foo<'a,'c>: 'b` can be elaborated to
+                // `'a: 'b`.
+
+                // Ignore `for<'a> T: 'a` -- we might in the future
+                // consider this as evidence that `T: 'static`, but
+                // I'm a bit wary of such constructions and so for now
+                // I want to be conservative. --nmatsakis
+                let ty_max = data.skip_binder().0;
+                let r_min = data.skip_binder().1;
+                if r_min.is_late_bound() {
+                    return;
+                }
+
+                let visited = &mut self.visited;
+                self.stack.extend(
+                    tcx.outlives_components(ty_max)
+                       .into_iter()
+                       .filter_map(|component| match component {
+                           Component::Region(r) => if r.is_late_bound() {
+                               None
+                           } else {
+                               Some(ty::Predicate::RegionOutlives(
+                                   ty::Binder::dummy(ty::OutlivesPredicate(r, r_min))))
+                           },
+
+                           Component::Param(p) => {
+                               let ty = tcx.mk_ty_param(p.idx, p.name);
+                               Some(ty::Predicate::TypeOutlives(
+                                   ty::Binder::dummy(ty::OutlivesPredicate(ty, r_min))))
+                           },
+
+                           Component::UnresolvedInferenceVariable(_) => {
+                               None
+                           },
+
+                           Component::Projection(_) |
+                           Component::EscapingProjection(_) => {
+                               // We can probably do more here. This
+                               // corresponds to a case like `<T as
+                               // Foo<'a>>::U: 'b`.
+                               None
+                           },
+                       })
+                       .filter(|p| visited.insert(p)));
             }
         }
     }
@@ -235,7 +279,7 @@ pub fn transitive_bounds<'cx, 'gcx, 'tcx>(tcx: TyCtxt<'cx, 'gcx, 'tcx>,
 pub struct SupertraitDefIds<'a, 'gcx: 'a+'tcx, 'tcx: 'a> {
     tcx: TyCtxt<'a, 'gcx, 'tcx>,
     stack: Vec<DefId>,
-    visited: FnvHashSet<DefId>,
+    visited: FxHashSet<DefId>,
 }
 
 pub fn supertrait_def_ids<'cx, 'gcx, 'tcx>(tcx: TyCtxt<'cx, 'gcx, 'tcx>,
@@ -243,7 +287,7 @@ pub fn supertrait_def_ids<'cx, 'gcx, 'tcx>(tcx: TyCtxt<'cx, 'gcx, 'tcx>,
                                            -> SupertraitDefIds<'cx, 'gcx, 'tcx>
 {
     SupertraitDefIds {
-        tcx: tcx,
+        tcx,
         stack: vec![trait_def_id],
         visited: Some(trait_def_id).into_iter().collect(),
     }
@@ -258,7 +302,7 @@ impl<'cx, 'gcx, 'tcx> Iterator for SupertraitDefIds<'cx, 'gcx, 'tcx> {
             None => { return None; }
         };
 
-        let predicates = self.tcx.lookup_super_predicates(def_id);
+        let predicates = self.tcx.super_predicates_of(def_id);
         let visited = &mut self.visited;
         self.stack.extend(
             predicates.predicates
@@ -303,6 +347,11 @@ impl<'tcx,I:Iterator<Item=ty::Predicate<'tcx>>> Iterator for FilterToTraits<I> {
             }
         }
     }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let (_, upper) = self.base_iterator.size_hint();
+        (0, upper)
+    }
 }
 
 ///////////////////////////////////////////////////////////////////////////
@@ -313,6 +362,7 @@ impl<'tcx,I:Iterator<Item=ty::Predicate<'tcx>>> Iterator for FilterToTraits<I> {
 /// returning the resulting trait ref and all obligations that arise.
 /// The obligations are closed under normalization.
 pub fn impl_trait_ref_and_oblig<'a, 'gcx, 'tcx>(selcx: &mut SelectionContext<'a, 'gcx, 'tcx>,
+                                                param_env: ty::ParamEnv<'tcx>,
                                                 impl_def_id: DefId,
                                                 impl_substs: &Substs<'tcx>)
                                                 -> (ty::TraitRef<'tcx>,
@@ -323,14 +373,14 @@ pub fn impl_trait_ref_and_oblig<'a, 'gcx, 'tcx>(selcx: &mut SelectionContext<'a,
     let impl_trait_ref =
         impl_trait_ref.subst(selcx.tcx(), impl_substs);
     let Normalized { value: impl_trait_ref, obligations: normalization_obligations1 } =
-        super::normalize(selcx, ObligationCause::dummy(), &impl_trait_ref);
+        super::normalize(selcx, param_env, ObligationCause::dummy(), &impl_trait_ref);
 
-    let predicates = selcx.tcx().lookup_predicates(impl_def_id);
+    let predicates = selcx.tcx().predicates_of(impl_def_id);
     let predicates = predicates.instantiate(selcx.tcx(), impl_substs);
     let Normalized { value: predicates, obligations: normalization_obligations2 } =
-        super::normalize(selcx, ObligationCause::dummy(), &predicates);
+        super::normalize(selcx, param_env, ObligationCause::dummy(), &predicates);
     let impl_obligations =
-        predicates_for_generics(ObligationCause::dummy(), 0, &predicates);
+        predicates_for_generics(ObligationCause::dummy(), 0, param_env, &predicates);
 
     let impl_obligations: Vec<_> =
         impl_obligations.into_iter()
@@ -344,6 +394,7 @@ pub fn impl_trait_ref_and_oblig<'a, 'gcx, 'tcx>(selcx: &mut SelectionContext<'a,
 /// See `super::obligations_for_generics`
 pub fn predicates_for_generics<'tcx>(cause: ObligationCause<'tcx>,
                                      recursion_depth: usize,
+                                     param_env: ty::ParamEnv<'tcx>,
                                      generic_bounds: &ty::InstantiatedPredicates<'tcx>)
                                      -> Vec<PredicateObligation<'tcx>>
 {
@@ -352,68 +403,42 @@ pub fn predicates_for_generics<'tcx>(cause: ObligationCause<'tcx>,
 
     generic_bounds.predicates.iter().map(|predicate| {
         Obligation { cause: cause.clone(),
-                     recursion_depth: recursion_depth,
+                     recursion_depth,
+                     param_env,
                      predicate: predicate.clone() }
     }).collect()
 }
 
 pub fn predicate_for_trait_ref<'tcx>(
     cause: ObligationCause<'tcx>,
+    param_env: ty::ParamEnv<'tcx>,
     trait_ref: ty::TraitRef<'tcx>,
     recursion_depth: usize)
     -> PredicateObligation<'tcx>
 {
     Obligation {
-        cause: cause,
-        recursion_depth: recursion_depth,
+        cause,
+        param_env,
+        recursion_depth,
         predicate: trait_ref.to_predicate(),
     }
 }
 
 impl<'a, 'gcx, 'tcx> TyCtxt<'a, 'gcx, 'tcx> {
-    pub fn trait_ref_for_builtin_bound(self,
-        builtin_bound: ty::BuiltinBound,
-        param_ty: Ty<'tcx>)
-        -> Result<ty::TraitRef<'tcx>, ErrorReported>
-    {
-        match self.lang_items.from_builtin_kind(builtin_bound) {
-            Ok(def_id) => {
-                Ok(ty::TraitRef {
-                    def_id: def_id,
-                    substs: Substs::new_trait(self, param_ty, &[])
-                })
-            }
-            Err(e) => {
-                self.sess.err(&e);
-                Err(ErrorReported)
-            }
-        }
-    }
-
     pub fn predicate_for_trait_def(self,
-        cause: ObligationCause<'tcx>,
-        trait_def_id: DefId,
-        recursion_depth: usize,
-        param_ty: Ty<'tcx>,
-        ty_params: &[Ty<'tcx>])
+                                   param_env: ty::ParamEnv<'tcx>,
+                                   cause: ObligationCause<'tcx>,
+                                   trait_def_id: DefId,
+                                   recursion_depth: usize,
+                                   self_ty: Ty<'tcx>,
+                                   params: &[Kind<'tcx>])
         -> PredicateObligation<'tcx>
     {
         let trait_ref = ty::TraitRef {
             def_id: trait_def_id,
-            substs: Substs::new_trait(self, param_ty, ty_params)
+            substs: self.mk_substs_trait(self_ty, params)
         };
-        predicate_for_trait_ref(cause, trait_ref, recursion_depth)
-    }
-
-    pub fn predicate_for_builtin_bound(self,
-        cause: ObligationCause<'tcx>,
-        builtin_bound: ty::BuiltinBound,
-        recursion_depth: usize,
-        param_ty: Ty<'tcx>)
-        -> Result<PredicateObligation<'tcx>, ErrorReported>
-    {
-        let trait_ref = self.trait_ref_for_builtin_bound(builtin_bound, param_ty)?;
-        Ok(predicate_for_trait_ref(cause, trait_ref, recursion_depth))
+        predicate_for_trait_ref(cause, param_env, trait_ref, recursion_depth)
     }
 
     /// Cast a trait reference into a reference to one of its super
@@ -440,8 +465,8 @@ impl<'a, 'gcx, 'tcx> TyCtxt<'a, 'gcx, 'tcx> {
         let mut entries = 0;
         // Count number of methods and add them to the total offset.
         // Skip over associated types and constants.
-        for trait_item in &self.trait_items(trait_ref.def_id())[..] {
-            if let ty::MethodTraitItem(_) = *trait_item {
+        for trait_item in self.associated_items(trait_ref.def_id()) {
+            if trait_item.kind == ty::AssociatedKind::Method {
                 entries += 1;
             }
         }
@@ -458,17 +483,13 @@ impl<'a, 'gcx, 'tcx> TyCtxt<'a, 'gcx, 'tcx> {
         // add them to the total offset.
         // Skip over associated types and constants.
         let mut entries = object.vtable_base;
-        for trait_item in &self.trait_items(object.upcast_trait_ref.def_id())[..] {
-            if trait_item.def_id() == method_def_id {
+        for trait_item in self.associated_items(object.upcast_trait_ref.def_id()) {
+            if trait_item.def_id == method_def_id {
                 // The item with the ID we were given really ought to be a method.
-                assert!(match *trait_item {
-                    ty::MethodTraitItem(_) => true,
-                    _ => false
-                });
-
+                assert_eq!(trait_item.kind, ty::AssociatedKind::Method);
                 return entries;
             }
-            if let ty::MethodTraitItem(_) = *trait_item {
+            if trait_item.kind == ty::AssociatedKind::Method {
                 entries += 1;
             }
         }
@@ -480,19 +501,55 @@ impl<'a, 'gcx, 'tcx> TyCtxt<'a, 'gcx, 'tcx> {
     pub fn closure_trait_ref_and_return_type(self,
         fn_trait_def_id: DefId,
         self_ty: Ty<'tcx>,
-        sig: &ty::PolyFnSig<'tcx>,
+        sig: ty::PolyFnSig<'tcx>,
         tuple_arguments: TupleArgumentsFlag)
         -> ty::Binder<(ty::TraitRef<'tcx>, Ty<'tcx>)>
     {
         let arguments_tuple = match tuple_arguments {
-            TupleArgumentsFlag::No => sig.0.inputs[0],
-            TupleArgumentsFlag::Yes => self.mk_tup(sig.0.inputs.to_vec()),
+            TupleArgumentsFlag::No => sig.skip_binder().inputs()[0],
+            TupleArgumentsFlag::Yes =>
+                self.intern_tup(sig.skip_binder().inputs()),
         };
         let trait_ref = ty::TraitRef {
             def_id: fn_trait_def_id,
-            substs: Substs::new_trait(self, self_ty, &[arguments_tuple]),
+            substs: self.mk_substs_trait(self_ty, &[arguments_tuple.into()]),
         };
-        ty::Binder((trait_ref, sig.0.output))
+        ty::Binder::bind((trait_ref, sig.skip_binder().output()))
+    }
+
+    pub fn generator_trait_ref_and_outputs(self,
+        fn_trait_def_id: DefId,
+        self_ty: Ty<'tcx>,
+        sig: ty::PolyGenSig<'tcx>)
+        -> ty::Binder<(ty::TraitRef<'tcx>, Ty<'tcx>, Ty<'tcx>)>
+    {
+        let trait_ref = ty::TraitRef {
+            def_id: fn_trait_def_id,
+            substs: self.mk_substs_trait(self_ty, &[]),
+        };
+        ty::Binder::bind((trait_ref, sig.skip_binder().yield_ty, sig.skip_binder().return_ty))
+    }
+
+    pub fn impl_is_default(self, node_item_def_id: DefId) -> bool {
+        match self.hir.as_local_node_id(node_item_def_id) {
+            Some(node_id) => {
+                let item = self.hir.expect_item(node_id);
+                if let hir::ItemKind::Impl(_, _, defaultness, ..) = item.node {
+                    defaultness.is_default()
+                } else {
+                    false
+                }
+            }
+            None => {
+                self.global_tcx()
+                    .impl_defaultness(node_item_def_id)
+                    .is_default()
+            }
+        }
+    }
+
+    pub fn impl_item_is_final(self, node_item: &NodeItem<hir::Defaultness>) -> bool {
+        node_item.item.is_final() && !self.impl_is_default(node_item.node.def_id())
     }
 }
 

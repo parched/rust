@@ -23,6 +23,7 @@ use syntax::ext::base::*;
 use syntax::ext::quote::rt::ToTokens;
 use syntax::parse::{self, token};
 use syntax::ptr::P;
+use syntax::symbol::Symbol;
 use syntax::tokenstream::TokenTree;
 use syntax_pos::Span;
 use rustc_plugin::Registry;
@@ -36,16 +37,13 @@ pub fn plugin_registrar(reg: &mut Registry) {
     reg.register_macro("make_a_1", expand_make_a_1);
     reg.register_macro("identity", expand_identity);
     reg.register_syntax_extension(
-        token::intern("into_multi_foo"),
-        // FIXME (#22405): Replace `Box::new` with `box` here when/if possible.
+        Symbol::intern("rustc_into_multi_foo"),
         MultiModifier(Box::new(expand_into_foo_multi)));
     reg.register_syntax_extension(
-        token::intern("duplicate"),
-        // FIXME (#22405): Replace `Box::new` with `box` here when/if possible.
+        Symbol::intern("rustc_duplicate"),
         MultiDecorator(Box::new(expand_duplicate)));
     reg.register_syntax_extension(
-        token::intern("caller"),
-        // FIXME (#22405): Replace `Box::new` with `box` here when/if possible.
+        Symbol::intern("rustc_caller"),
         MultiDecorator(Box::new(expand_caller)));
 }
 
@@ -59,7 +57,7 @@ fn expand_make_a_1(cx: &mut ExtCtxt, sp: Span, tts: &[TokenTree]) -> Box<MacResu
 // See Issue #15750
 fn expand_identity(cx: &mut ExtCtxt, _span: Span, tts: &[TokenTree]) -> Box<MacResult + 'static> {
     // Parse an expression and emit it unchanged.
-    let mut parser = parse::new_parser_from_tts(cx.parse_sess(), cx.cfg(), tts.to_vec());
+    let mut parser = parse::new_parser_from_tts(cx.parse_sess(), tts.to_vec());
     let expr = parser.parse_expr().unwrap();
     MacEager::expr(quote_expr!(&mut *cx, $expr))
 }
@@ -81,7 +79,7 @@ fn expand_into_foo_multi(cx: &mut ExtCtxt,
         Annotatable::ImplItem(_it) => vec![
             quote_item!(cx, impl X { fn foo(&self) -> i32 { 42 } }).unwrap().and_then(|i| {
                 match i.node {
-                    ItemKind::Impl(_, _, _, _, _, mut items) => {
+                    ItemKind::Impl(.., mut items) => {
                         Annotatable::ImplItem(P(items.pop().expect("impl method not found")))
                     }
                     _ => unreachable!("impl parsed to something other than impl")
@@ -91,13 +89,17 @@ fn expand_into_foo_multi(cx: &mut ExtCtxt,
         Annotatable::TraitItem(_it) => vec![
             quote_item!(cx, trait X { fn foo(&self) -> i32 { 0 } }).unwrap().and_then(|i| {
                 match i.node {
-                    ItemKind::Trait(_, _, _, mut items) => {
+                    ItemKind::Trait(.., mut items) => {
                         Annotatable::TraitItem(P(items.pop().expect("trait method not found")))
                     }
                     _ => unreachable!("trait parsed to something other than trait")
                 }
             })
         ],
+        // covered in proc_macro/macros-in-extern.rs
+        Annotatable::ForeignItem(..) => unimplemented!(),
+        // covered in proc_macro/attr-stmt-expr.rs
+        Annotatable::Stmt(_) | Annotatable::Expr(_) => panic!("expected item"),
     }
 }
 
@@ -108,9 +110,9 @@ fn expand_duplicate(cx: &mut ExtCtxt,
                     it: &Annotatable,
                     push: &mut FnMut(Annotatable)) {
     let copy_name = match mi.node {
-        ast::MetaItemKind::List(_, ref xs) => {
+        ast::MetaItemKind::List(ref xs) => {
             if let Some(word) = xs[0].word() {
-                token::str_to_ident(&word.name())
+                word.ident.segments.last().unwrap().ident
             } else {
                 cx.span_err(mi.span, "Expected word");
                 return;
@@ -142,6 +144,10 @@ fn expand_duplicate(cx: &mut ExtCtxt,
             new_it.ident = copy_name;
             push(Annotatable::TraitItem(P(new_it)));
         }
+        // covered in proc_macro/macros-in-extern.rs
+        Annotatable::ForeignItem(..) => unimplemented!(),
+        // covered in proc_macro/attr-stmt-expr.rs
+        Annotatable::Stmt(_) | Annotatable::Expr(_) => panic!("expected item")
     }
 }
 
@@ -165,7 +171,7 @@ fn expand_caller(cx: &mut ExtCtxt,
                  push: &mut FnMut(Annotatable)) {
     let (orig_fn_name, ret_type) = match *it {
         Annotatable::Item(ref item) => match item.node {
-            ItemKind::Fn(ref decl, _, _, _, _, _) => {
+            ItemKind::Fn(ref decl, ..) => {
                 (item.ident, &decl.output)
             }
             _ => cx.span_fatal(item.span, "Only functions with return types can be annotated.")
@@ -179,7 +185,7 @@ fn expand_caller(cx: &mut ExtCtxt,
         }
 
         let fn_name = match list[0].name() {
-            Some(name) => token::str_to_ident(&name),
+            Some(name) => ast::Ident::with_empty_ctxt(name),
             None => cx.span_fatal(list[0].span(), "First parameter must be an ident.")
         };
 

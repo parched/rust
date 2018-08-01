@@ -8,12 +8,9 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-// ignore-pretty : (#23623) problems when  ending with // comments
-
 // no-prefer-dynamic
 
 #![allow(dead_code)]
-#![feature(const_fn)]
 
 // check dtor calling order when casting enums.
 

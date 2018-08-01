@@ -14,11 +14,10 @@ use generated_code;
 
 use std::cell::Cell;
 use std::env;
-use std::path::Path;
 
-use syntax::ast;
-use syntax::parse::lexer::{self, Reader, StringReader};
-use syntax::parse::token::{self, keywords, Token};
+use syntax::parse::lexer::{self, StringReader};
+use syntax::parse::token::{self, Token};
+use syntax::symbol::keywords;
 use syntax_pos::*;
 
 #[derive(Clone)]
@@ -32,34 +31,20 @@ pub struct SpanUtils<'a> {
 impl<'a> SpanUtils<'a> {
     pub fn new(sess: &'a Session) -> SpanUtils<'a> {
         SpanUtils {
-            sess: sess,
+            sess,
             err_count: Cell::new(0),
         }
     }
 
-    pub fn make_path_string(file_name: &str) -> String {
-        let path = Path::new(file_name);
-        if path.is_absolute() {
-            path.clone().display().to_string()
-        } else {
-            env::current_dir().unwrap().join(&path).display().to_string()
-        }
-    }
-
-    // sub_span starts at span.lo, so we need to adjust the positions etc.
-    // If sub_span is None, we don't need to adjust.
-    pub fn make_sub_span(&self, span: Span, sub_span: Option<Span>) -> Option<Span> {
-        match sub_span {
-            None => None,
-            Some(sub) => {
-                let FileMapAndBytePos {fm, pos} = self.sess.codemap().lookup_byte_offset(span.lo);
-                let base = pos + fm.start_pos;
-                Some(Span {
-                    lo: base + self.sess.codemap().lookup_byte_offset(sub.lo).pos,
-                    hi: base + self.sess.codemap().lookup_byte_offset(sub.hi).pos,
-                    expn_id: span.expn_id,
-                })
-            }
+    pub fn make_path_string(path: &FileName) -> String {
+        match *path {
+            FileName::Real(ref path) if !path.is_absolute() =>
+                env::current_dir()
+                    .unwrap()
+                    .join(&path)
+                    .display()
+                    .to_string(),
+            _ => path.to_string(),
         }
     }
 
@@ -71,19 +56,7 @@ impl<'a> SpanUtils<'a> {
     }
 
     pub fn retokenise_span(&self, span: Span) -> StringReader<'a> {
-        // sadness - we don't have spans for sub-expressions nor access to the tokens
-        // so in order to get extents for the function name itself (which dxr expects)
-        // we need to re-tokenise the fn definition
-
-        // Note: this is a bit awful - it adds the contents of span to the end of
-        // the codemap as a new filemap. This is mostly OK, but means we should
-        // not iterate over the codemap. Also, any spans over the new filemap
-        // are incompatible with spans over other filemaps.
-        let filemap = self.sess
-                          .codemap()
-                          .new_filemap(String::from("<anon-dxr>"), None, self.snippet(span));
-        let s = self.sess;
-        lexer::StringReader::new(s.diagnostic(), filemap)
+        lexer::StringReader::retokenize(&self.sess.parse_sess, span)
     }
 
     // Re-parses a path and returns the span for the last identifier in the path
@@ -95,7 +68,7 @@ impl<'a> SpanUtils<'a> {
         loop {
             let ts = toks.real_token();
             if ts.tok == token::Eof {
-                return self.make_sub_span(span, result)
+                return result;
             }
             if bracket_count == 0 && (ts.tok.is_ident() || ts.tok.is_keyword(keywords::SelfValue)) {
                 result = Some(ts.sp);
@@ -120,7 +93,7 @@ impl<'a> SpanUtils<'a> {
                 return None;
             }
             if bracket_count == 0 && (ts.tok.is_ident() || ts.tok.is_keyword(keywords::SelfValue)) {
-                return self.make_sub_span(span, Some(ts.sp));
+                return Some(ts.sp);
             }
 
             bracket_count += match ts.tok {
@@ -132,70 +105,44 @@ impl<'a> SpanUtils<'a> {
         }
     }
 
-    // Return the span for the last ident before a `(` or `<` or '::<' and outside any
-    // any brackets, or the last span.
-    pub fn sub_span_for_meth_name(&self, span: Span) -> Option<Span> {
-        let mut toks = self.retokenise_span(span);
-        let mut prev = toks.real_token();
-        let mut result = None;
-        let mut bracket_count = 0;
-        let mut last_span = None;
-        while prev.tok != token::Eof {
-            last_span = None;
-            let mut next = toks.real_token();
-
-            if (next.tok == token::OpenDelim(token::Paren) || next.tok == token::Lt) &&
-               bracket_count == 0 && prev.tok.is_ident() {
-                result = Some(prev.sp);
-            }
-
-            if bracket_count == 0 && next.tok == token::ModSep {
-                let old = prev;
-                prev = next;
-                next = toks.real_token();
-                if next.tok == token::Lt && old.tok.is_ident() {
-                    result = Some(old.sp);
-                }
-            }
-
-            bracket_count += match prev.tok {
-                token::OpenDelim(token::Paren) | token::Lt => 1,
-                token::CloseDelim(token::Paren) | token::Gt => -1,
-                token::BinOp(token::Shr) => -2,
-                _ => 0,
-            };
-
-            if prev.tok.is_ident() && bracket_count == 0 {
-                last_span = Some(prev.sp);
-            }
-            prev = next;
-        }
-        if result.is_none() && last_span.is_some() {
-            return self.make_sub_span(span, last_span);
-        }
-        return self.make_sub_span(span, result);
-    }
-
     // Return the span for the last ident before a `<` and outside any
-    // brackets, or the last span.
+    // angle brackets, or the last span.
     pub fn sub_span_for_type_name(&self, span: Span) -> Option<Span> {
         let mut toks = self.retokenise_span(span);
         let mut prev = toks.real_token();
         let mut result = None;
+
+        // We keep track of the following two counts - the depth of nesting of
+        // angle brackets, and the depth of nesting of square brackets. For the
+        // angle bracket count, we only count tokens which occur outside of any
+        // square brackets (i.e. bracket_count == 0). The intuition here is
+        // that we want to count angle brackets in the type, but not any which
+        // could be in expression context (because these could mean 'less than',
+        // etc.).
+        let mut angle_count = 0;
         let mut bracket_count = 0;
         loop {
             let next = toks.real_token();
 
-            if (next.tok == token::Lt || next.tok == token::Colon) && bracket_count == 0 &&
-               prev.tok.is_ident() {
+            if (next.tok == token::Lt || next.tok == token::Colon) && angle_count == 0
+                && bracket_count == 0 && prev.tok.is_ident()
+            {
                 result = Some(prev.sp);
             }
 
+            if bracket_count == 0 {
+                angle_count += match prev.tok {
+                    token::Lt => 1,
+                    token::Gt => -1,
+                    token::BinOp(token::Shl) => 2,
+                    token::BinOp(token::Shr) => -2,
+                    _ => 0,
+                };
+            }
+
             bracket_count += match prev.tok {
-                token::Lt => 1,
-                token::Gt => -1,
-                token::BinOp(token::Shl) => 2,
-                token::BinOp(token::Shr) => -2,
+                token::OpenDelim(token::Bracket) => 1,
+                token::CloseDelim(token::Bracket) => -1,
                 _ => 0,
             };
 
@@ -204,79 +151,23 @@ impl<'a> SpanUtils<'a> {
             }
             prev = next;
         }
-        if bracket_count != 0 {
-            let loc = self.sess.codemap().lookup_char_pos(span.lo);
-            span_bug!(span,
-                      "Mis-counted brackets when breaking path? Parsing '{}' \
-                       in {}, line {}",
-                      self.snippet(span),
-                      loc.file.name,
-                      loc.line);
-        }
-        if result.is_none() && prev.tok.is_ident() && bracket_count == 0 {
-            return self.make_sub_span(span, Some(prev.sp));
-        }
-        self.make_sub_span(span, result)
-    }
-
-    // Reparse span and return an owned vector of sub spans of the first limit
-    // identifier tokens in the given nesting level.
-    // example with Foo<Bar<T,V>, Bar<T,V>>
-    // Nesting = 0: all idents outside of brackets: [Foo]
-    // Nesting = 1: idents within one level of brackets: [Bar, Bar]
-    pub fn spans_with_brackets(&self, span: Span, nesting: isize, limit: isize) -> Vec<Span> {
-        let mut result: Vec<Span> = vec!();
-
-        let mut toks = self.retokenise_span(span);
-        // We keep track of how many brackets we're nested in
-        let mut bracket_count: isize = 0;
-        let mut found_ufcs_sep = false;
-        loop {
-            let ts = toks.real_token();
-            if ts.tok == token::Eof {
-                if bracket_count != 0 {
-                    if generated_code(span) {
-                        return vec!();
-                    }
-                    let loc = self.sess.codemap().lookup_char_pos(span.lo);
-                    span_bug!(span,
-                              "Mis-counted brackets when breaking path? \
-                               Parsing '{}' in {}, line {}",
-                              self.snippet(span),
-                              loc.file.name,
-                              loc.line);
-                }
-                return result
-            }
-            if (result.len() as isize) == limit {
-                return result;
-            }
-            bracket_count += match ts.tok {
-                token::Lt => 1,
-                token::Gt => -1,
-                token::BinOp(token::Shl) => 2,
-                token::BinOp(token::Shr) => -2,
-                _ => 0,
-            };
-
-            // Ignore the `>::` in `<Type as Trait>::AssocTy`.
-
-            // The root cause of this hack is that the AST representation of
-            // qpaths is horrible. It treats <A as B>::C as a path with two
-            // segments, B and C and notes that there is also a self type A at
-            // position 0. Because we don't have spans for individual idents,
-            // only the whole path, we have to iterate over the tokens in the
-            // path, trying to pull out the non-nested idents (e.g., avoiding 'a
-            // in `<A as B<'a>>::C`). So we end up with a span for `B>::C` from
-            // the start of the first ident to the end of the path.
-            if !found_ufcs_sep && bracket_count == -1 {
-                found_ufcs_sep = true;
-                bracket_count += 1;
-            }
-            if ts.tok.is_ident() && bracket_count == nesting {
-                result.push(self.make_sub_span(span, Some(ts.sp)).unwrap());
+        #[cfg(debug_assertions)] {
+            if angle_count != 0 || bracket_count != 0 {
+                let loc = self.sess.codemap().lookup_char_pos(span.lo());
+                span_bug!(
+                    span,
+                    "Mis-counted brackets when breaking path? Parsing '{}' \
+                     in {}, line {}",
+                    self.snippet(span),
+                    loc.file.name,
+                    loc.line
+                );
             }
         }
+        if result.is_none() && prev.tok.is_ident() {
+            return Some(prev.sp);
+        }
+        result
     }
 
     pub fn sub_span_before_token(&self, span: Span, tok: Token) -> Option<Span> {
@@ -288,7 +179,7 @@ impl<'a> SpanUtils<'a> {
             }
             let next = toks.real_token();
             if next.tok == tok {
-                return self.make_sub_span(span, Some(prev.sp));
+                return Some(prev.sp);
             }
             prev = next;
         }
@@ -302,17 +193,13 @@ impl<'a> SpanUtils<'a> {
                 return None;
             }
             if next.tok == tok {
-                return self.make_sub_span(span, Some(next.sp));
+                return Some(next.sp);
             }
         }
     }
 
     pub fn sub_span_after_keyword(&self, span: Span, keyword: keywords::Keyword) -> Option<Span> {
         self.sub_span_after(span, |t| t.is_keyword(keyword))
-    }
-
-    pub fn sub_span_after_token(&self, span: Span, tok: Token) -> Option<Span> {
-        self.sub_span_after(span, |t| t == tok)
     }
 
     fn sub_span_after<F: Fn(Token) -> bool>(&self, span: Span, f: F) -> Option<Span> {
@@ -325,80 +212,52 @@ impl<'a> SpanUtils<'a> {
             if f(ts.tok) {
                 let ts = toks.real_token();
                 if ts.tok == token::Eof {
-                    return None
-                } else {
-                    return self.make_sub_span(span, Some(ts.sp));
-                }
-            }
-        }
-    }
-
-
-    // Returns a list of the spans of idents in a path.
-    // E.g., For foo::bar<x,t>::baz, we return [foo, bar, baz] (well, their spans)
-    pub fn spans_for_path_segments(&self, path: &ast::Path) -> Vec<Span> {
-        self.spans_with_brackets(path.span, 0, -1)
-    }
-
-    // Return an owned vector of the subspans of the param identifier
-    // tokens found in span.
-    pub fn spans_for_ty_params(&self, span: Span, number: isize) -> Vec<Span> {
-        // Type params are nested within one level of brackets:
-        // i.e. we want Vec<A, B> from Foo<A, B<T,U>>
-        self.spans_with_brackets(span, 1, number)
-    }
-
-    pub fn report_span_err(&self, kind: &str, span: Span) {
-        let loc = self.sess.codemap().lookup_char_pos(span.lo);
-        info!("({}) Could not find sub_span in `{}` in {}, line {}",
-              kind,
-              self.snippet(span),
-              loc.file.name,
-              loc.line);
-        self.err_count.set(self.err_count.get() + 1);
-        if self.err_count.get() > 1000 {
-            bug!("span errors reached 1000, giving up");
-        }
-    }
-
-    // Return the name for a macro definition (identifier after first `!`)
-    pub fn span_for_macro_def_name(&self, span: Span) -> Option<Span> {
-        let mut toks = self.retokenise_span(span);
-        loop {
-            let ts = toks.real_token();
-            if ts.tok == token::Eof {
-                return None;
-            }
-            if ts.tok == token::Not {
-                let ts = toks.real_token();
-                if ts.tok.is_ident() {
-                    return self.make_sub_span(span, Some(ts.sp));
-                } else {
                     return None;
+                } else {
+                    return Some(ts.sp);
                 }
             }
         }
     }
 
-    // Return the name for a macro use (identifier before first `!`).
-    pub fn span_for_macro_use_name(&self, span:Span) -> Option<Span> {
-        let mut toks = self.retokenise_span(span);
-        let mut prev = toks.real_token();
-        loop {
-            if prev.tok == token::Eof {
-                return None;
-            }
-            let ts = toks.real_token();
-            if ts.tok == token::Not {
-                if prev.tok.is_ident() {
-                    return self.make_sub_span(span, Some(prev.sp));
-                } else {
-                    return None;
-                }
-            }
-            prev = ts;
-        }
-    }
+    // // Return the name for a macro definition (identifier after first `!`)
+    // pub fn span_for_macro_def_name(&self, span: Span) -> Option<Span> {
+    //     let mut toks = self.retokenise_span(span);
+    //     loop {
+    //         let ts = toks.real_token();
+    //         if ts.tok == token::Eof {
+    //             return None;
+    //         }
+    //         if ts.tok == token::Not {
+    //             let ts = toks.real_token();
+    //             if ts.tok.is_ident() {
+    //                 return Some(ts.sp);
+    //             } else {
+    //                 return None;
+    //             }
+    //         }
+    //     }
+    // }
+
+    // // Return the name for a macro use (identifier before first `!`).
+    // pub fn span_for_macro_use_name(&self, span:Span) -> Option<Span> {
+    //     let mut toks = self.retokenise_span(span);
+    //     let mut prev = toks.real_token();
+    //     loop {
+    //         if prev.tok == token::Eof {
+    //             return None;
+    //         }
+    //         let ts = toks.real_token();
+    //         if ts.tok == token::Not {
+    //             if prev.tok.is_ident() {
+    //                 return Some(prev.sp);
+    //             } else {
+    //                 return None;
+    //             }
+    //         }
+    //         prev = ts;
+    //     }
+    // }
 
     /// Return true if the span is generated code, and
     /// it is not a subspan of the root callsite.
@@ -414,24 +273,29 @@ impl<'a> SpanUtils<'a> {
             return false;
         }
         // If sub_span is none, filter out generated code.
-        if sub_span.is_none() {
-            return true;
-        }
+        let sub_span = match sub_span {
+            Some(ss) => ss,
+            None => return true,
+        };
 
         //If the span comes from a fake filemap, filter it.
-        if !self.sess.codemap().lookup_char_pos(parent.lo).file.is_real_file() {
+        if !self.sess
+            .codemap()
+            .lookup_char_pos(parent.lo())
+            .file
+            .is_real_file()
+        {
             return true;
         }
 
         // Otherwise, a generated span is deemed invalid if it is not a sub-span of the root
         // callsite. This filters out macro internal variables and most malformed spans.
-        let span = self.sess.codemap().source_callsite(parent);
-        !(span.contains(parent))
+        !parent.source_callsite().contains(sub_span)
     }
 }
 
 macro_rules! filter {
-    ($util: expr, $span: ident, $parent: expr, None) => {
+    ($util: expr, $span: expr, $parent: expr, None) => {
         if $util.filter_generated($span, $parent) {
             return None;
         }

@@ -9,51 +9,14 @@
 // except according to those terms.
 
 //! Exposes the NonZero lang item which provides optimization hints.
-#![unstable(feature = "nonzero",
-            reason = "needs an RFC to flesh out the design",
-            issue = "27730")]
 
-use ops::{CoerceUnsized, Deref};
-
-/// Unsafe trait to indicate what types are usable with the NonZero struct
-pub unsafe trait Zeroable {}
-
-unsafe impl<T:?Sized> Zeroable for *const T {}
-unsafe impl<T:?Sized> Zeroable for *mut T {}
-unsafe impl Zeroable for isize {}
-unsafe impl Zeroable for usize {}
-unsafe impl Zeroable for i8 {}
-unsafe impl Zeroable for u8 {}
-unsafe impl Zeroable for i16 {}
-unsafe impl Zeroable for u16 {}
-unsafe impl Zeroable for i32 {}
-unsafe impl Zeroable for u32 {}
-unsafe impl Zeroable for i64 {}
-unsafe impl Zeroable for u64 {}
+use ops::CoerceUnsized;
 
 /// A wrapper type for raw pointers and integers that will never be
 /// NULL or 0 that might allow certain optimizations.
 #[lang = "non_zero"]
-#[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Debug, Hash)]
-pub struct NonZero<T: Zeroable>(T);
+#[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[repr(transparent)]
+pub(crate) struct NonZero<T>(pub(crate) T);
 
-impl<T: Zeroable> NonZero<T> {
-    /// Creates an instance of NonZero with the provided value.
-    /// You must indeed ensure that the value is actually "non-zero".
-    #[inline(always)]
-    pub const unsafe fn new(inner: T) -> NonZero<T> {
-        NonZero(inner)
-    }
-}
-
-impl<T: Zeroable> Deref for NonZero<T> {
-    type Target = T;
-
-    #[inline]
-    fn deref(&self) -> &T {
-        let NonZero(ref inner) = *self;
-        inner
-    }
-}
-
-impl<T: Zeroable+CoerceUnsized<U>, U: Zeroable> CoerceUnsized<NonZero<U>> for NonZero<T> {}
+impl<T: CoerceUnsized<U>, U> CoerceUnsized<NonZero<U>> for NonZero<T> {}

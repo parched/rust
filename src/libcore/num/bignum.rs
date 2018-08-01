@@ -19,7 +19,7 @@
 //! inputs, but we don't do so to avoid the code bloat. Each bignum is still
 //! tracked for the actual usages, so it normally doesn't matter.
 
-// This module is only for dec2flt and flt2dec, and only public because of libcoretest.
+// This module is only for dec2flt and flt2dec, and only public because of coretests.
 // It is not intended to ever be stabilized.
 #![doc(hidden)]
 #![unstable(feature = "core_private_bignum",
@@ -34,19 +34,22 @@ use intrinsics;
 pub trait FullOps: Sized {
     /// Returns `(carry', v')` such that `carry' * 2^W + v' = self + other + carry`,
     /// where `W` is the number of bits in `Self`.
-    fn full_add(self, other: Self, carry: bool) -> (bool /*carry*/, Self);
+    fn full_add(self, other: Self, carry: bool) -> (bool /* carry */, Self);
 
     /// Returns `(carry', v')` such that `carry' * 2^W + v' = self * other + carry`,
     /// where `W` is the number of bits in `Self`.
-    fn full_mul(self, other: Self, carry: Self) -> (Self /*carry*/, Self);
+    fn full_mul(self, other: Self, carry: Self) -> (Self /* carry */, Self);
 
     /// Returns `(carry', v')` such that `carry' * 2^W + v' = self * other + other2 + carry`,
     /// where `W` is the number of bits in `Self`.
-    fn full_mul_add(self, other: Self, other2: Self, carry: Self) -> (Self /*carry*/, Self);
+    fn full_mul_add(self, other: Self, other2: Self, carry: Self) -> (Self /* carry */, Self);
 
     /// Returns `(quo, rem)` such that `borrow * 2^W + self = quo * other + rem`
     /// and `0 <= rem < other`, where `W` is the number of bits in `Self`.
-    fn full_div_rem(self, other: Self, borrow: Self) -> (Self /*quotient*/, Self /*remainder*/);
+    fn full_div_rem(self,
+                    other: Self,
+                    borrow: Self)
+                    -> (Self /* quotient */, Self /* remainder */);
 }
 
 macro_rules! impl_full_ops {
@@ -100,11 +103,7 @@ impl_full_ops! {
 
 /// Table of powers of 5 representable in digits. Specifically, the largest {u8, u16, u32} value
 /// that's a power of five, plus the corresponding exponent. Used in `mul_pow5`.
-const SMALL_POW5: [(u64, usize); 3] = [
-    (125, 3),
-    (15625, 6),
-    (1_220_703_125, 13),
-];
+const SMALL_POW5: [(u64, usize); 3] = [(125, 3), (15625, 6), (1_220_703_125, 13)];
 
 macro_rules! define_bignum {
     ($name:ident: type=$ty:ty, n=$n:expr) => (
@@ -115,7 +114,7 @@ macro_rules! define_bignum {
         /// copying it recklessly may result in the performance hit.
         /// Thus this is intentionally not `Copy`.
         ///
-        /// All operations available to bignums panic in the case of over/underflows.
+        /// All operations available to bignums panic in the case of overflows.
         /// The caller is responsible to use large enough bignum types.
         pub struct $name {
             /// One plus the offset to the maximum "digit" in use.
@@ -149,14 +148,14 @@ macro_rules! define_bignum {
                 $name { size: sz, base: base }
             }
 
-            /// Return the internal digits as a slice `[a, b, c, ...]` such that the numeric
+            /// Returns the internal digits as a slice `[a, b, c, ...]` such that the numeric
             /// value is `a + b * 2^W + c * 2^(2W) + ...` where `W` is the number of bits in
             /// the digit type.
             pub fn digits(&self) -> &[$ty] {
                 &self.base[..self.size]
             }
 
-            /// Return the `i`-th bit where bit 0 is the least significant one.
+            /// Returns the `i`-th bit where bit 0 is the least significant one.
             /// In other words, the bit with weight `2^i`.
             pub fn get_bit(&self, i: usize) -> u8 {
                 use mem;
@@ -167,7 +166,7 @@ macro_rules! define_bignum {
                 ((self.base[d] >> b) & 1) as u8
             }
 
-            /// Returns true if the bignum is zero.
+            /// Returns `true` if the bignum is zero.
             pub fn is_zero(&self) -> bool {
                 self.digits().iter().all(|&v| v == 0)
             }
@@ -474,9 +473,9 @@ macro_rules! define_bignum {
                 let sz = if self.size < 1 {1} else {self.size};
                 let digitlen = mem::size_of::<$ty>() * 2;
 
-                try!(write!(f, "{:#x}", self.base[sz-1]));
+                write!(f, "{:#x}", self.base[sz-1])?;
                 for &v in self.base[..sz-1].iter().rev() {
-                    try!(write!(f, "_{:01$x}", v, digitlen));
+                    write!(f, "_{:01$x}", v, digitlen)?;
                 }
                 ::result::Result::Ok(())
             }

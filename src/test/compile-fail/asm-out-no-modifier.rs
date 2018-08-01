@@ -8,6 +8,16 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+// ignore-s390x
+// ignore-emscripten
+// ignore-powerpc
+// ignore-powerpc64
+// ignore-powerpc64le
+// ignore-sparc
+// ignore-sparc64
+// ignore-mips
+// ignore-mips64
+
 #![feature(asm)]
 
 fn foo(x: isize) { println!("{}", x); }

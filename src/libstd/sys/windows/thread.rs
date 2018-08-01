@@ -8,7 +8,7 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-use alloc::boxed::FnBox;
+use boxed::FnBox;
 use io;
 use ffi::CStr;
 use mem;
@@ -19,12 +19,16 @@ use sys::handle::Handle;
 use sys_common::thread::*;
 use time::Duration;
 
+use super::to_u16s;
+
+pub const DEFAULT_MIN_STACK_SIZE: usize = 2 * 1024 * 1024;
+
 pub struct Thread {
     handle: Handle
 }
 
 impl Thread {
-    pub unsafe fn new<'a>(stack: usize, p: Box<FnBox() + 'a>)
+    pub unsafe fn new<'a>(stack: usize, p: Box<dyn FnBox() + 'a>)
                           -> io::Result<Thread> {
         let p = box p;
 
@@ -48,20 +52,25 @@ impl Thread {
         };
 
         extern "system" fn thread_start(main: *mut c_void) -> c::DWORD {
-            unsafe { start_thread(main); }
+            unsafe { start_thread(main as *mut u8); }
             0
         }
     }
 
-    pub fn set_name(_name: &CStr) {
-        // Windows threads are nameless
-        // The names in MSVC debugger are obtained using a "magic" exception,
-        // which requires a use of MS C++ extensions.
-        // See https://msdn.microsoft.com/en-us/library/xcb2z8hs.aspx
+    pub fn set_name(name: &CStr) {
+        if let Ok(utf8) = name.to_str() {
+            if let Ok(utf16) = to_u16s(utf8) {
+                unsafe { c::SetThreadDescription(c::GetCurrentThread(), utf16.as_ptr()); };
+            };
+        };
     }
 
     pub fn join(self) {
-        unsafe { c::WaitForSingleObject(self.handle.raw(), c::INFINITE); }
+        let rc = unsafe { c::WaitForSingleObject(self.handle.raw(), c::INFINITE) };
+        if rc == c::WAIT_FAILED {
+            panic!("failed to join on thread: {}",
+                   io::Error::last_os_error());
+        }
     }
 
     pub fn yield_now() {
@@ -84,6 +93,8 @@ impl Thread {
 
 #[cfg_attr(test, allow(dead_code))]
 pub mod guard {
-    pub unsafe fn current() -> Option<usize> { None }
-    pub unsafe fn init() -> Option<usize> { None }
+    pub type Guard = !;
+    pub unsafe fn current() -> Option<Guard> { None }
+    pub unsafe fn init() -> Option<Guard> { None }
+    pub unsafe fn deinit() {}
 }

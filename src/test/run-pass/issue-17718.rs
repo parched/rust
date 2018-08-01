@@ -10,10 +10,6 @@
 
 // aux-build:issue-17718-aux.rs
 
-
-#![feature(core)]
-#![feature(const_fn)]
-
 extern crate issue_17718_aux as other;
 
 use std::sync::atomic::{AtomicUsize, Ordering};

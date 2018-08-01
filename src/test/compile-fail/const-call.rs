@@ -8,13 +8,12 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-#![feature(const_fn)]
-
 fn f(x: usize) -> usize {
     x
 }
 
 fn main() {
-    let _ = [0; f(2)]; //~ ERROR constant evaluation error [E0080]
-                       //~| non-constant path in constant expression
+    let _ = [0; f(2)];
+    //~^ ERROR calls in constants are limited to constant functions
+    //~| E0080
 }

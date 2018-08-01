@@ -8,6 +8,9 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+// revisions: lexical nll
+#![cfg_attr(nll, feature(nll))]
+
 // Exercise the unused_mut attribute in some positive and negative cases
 
 #![allow(unused_assignments)]
@@ -18,15 +21,22 @@
 
 fn main() {
     // negative cases
-    let mut a = 3; //~ ERROR: variable does not need to be mutable
-    let mut a = 2; //~ ERROR: variable does not need to be mutable
-    let mut b = 3; //~ ERROR: variable does not need to be mutable
-    let mut a = vec!(3); //~ ERROR: variable does not need to be mutable
-    let (mut a, b) = (1, 2); //~ ERROR: variable does not need to be mutable
-    let mut a; //~ ERROR: variable does not need to be mutable
+    let mut a = 3; //[lexical]~ ERROR: variable does not need to be mutable
+                   //[nll]~^ ERROR: variable does not need to be mutable
+    let mut a = 2; //[lexical]~ ERROR: variable does not need to be mutable
+                   //[nll]~^ ERROR: variable does not need to be mutable
+    let mut b = 3; //[lexical]~ ERROR: variable does not need to be mutable
+                   //[nll]~^ ERROR: variable does not need to be mutable
+    let mut a = vec![3]; //[lexical]~ ERROR: variable does not need to be mutable
+                         //[nll]~^ ERROR: variable does not need to be mutable
+    let (mut a, b) = (1, 2); //[lexical]~ ERROR: variable does not need to be mutable
+                             //[nll]~^ ERROR: variable does not need to be mutable
+    let mut a; //[lexical]~ ERROR: variable does not need to be mutable
+               //[nll]~^ ERROR: variable does not need to be mutable
     a = 3;
 
-    let mut b; //~ ERROR: variable does not need to be mutable
+    let mut b; //[lexical]~ ERROR: variable does not need to be mutable
+               //[nll]~^ ERROR: variable does not need to be mutable
     if true {
         b = 3;
     } else {
@@ -34,18 +44,46 @@ fn main() {
     }
 
     match 30 {
-        mut x => {} //~ ERROR: variable does not need to be mutable
+        mut x => {} //[lexical]~ ERROR: variable does not need to be mutable
+                    //[nll]~^ ERROR: variable does not need to be mutable
     }
     match (30, 2) {
-      (mut x, 1) | //~ ERROR: variable does not need to be mutable
+      (mut x, 1) | //[lexical]~ ERROR: variable does not need to be mutable
+                   //[nll]~^ ERROR: variable does not need to be mutable
       (mut x, 2) |
       (mut x, 3) => {
       }
       _ => {}
     }
 
-    let x = |mut y: isize| 10; //~ ERROR: variable does not need to be mutable
-    fn what(mut foo: isize) {} //~ ERROR: variable does not need to be mutable
+    let x = |mut y: isize| 10; //[lexical]~ ERROR: variable does not need to be mutable
+                               //[nll]~^ ERROR: variable does not need to be mutable
+    fn what(mut foo: isize) {} //[lexical]~ ERROR: variable does not need to be mutable
+                               //[nll]~^ ERROR: variable does not need to be mutable
+
+    let mut a = &mut 5; //[lexical]~ ERROR: variable does not need to be mutable
+                        //[nll]~^ ERROR: variable does not need to be mutable
+    *a = 4;
+
+    let mut a = 5;
+    let mut b = (&mut a,); //[lexical]~ ERROR: variable does not need to be mutable
+    *b.0 = 4;              //[nll]~^ ERROR: variable does not need to be mutable
+
+    let mut x = &mut 1; //[lexical]~ ERROR: variable does not need to be mutable
+                        //[nll]~^ ERROR: variable does not need to be mutable
+    let mut f = || {
+      *x += 1;
+    };
+    f();
+
+    fn mut_ref_arg(mut arg : &mut [u8]) -> &mut [u8] {
+        &mut arg[..] //[lexical]~^ ERROR: variable does not need to be mutable
+                     //[nll]~^^ ERROR: variable does not need to be mutable
+    }
+
+    let mut v : &mut Vec<()> = &mut vec![]; //[lexical]~ ERROR: variable does not need to be mutable
+                                            //[nll]~^ ERROR: variable does not need to be mutable
+    v.push(());
 
     // positive cases
     let mut a = 2;
@@ -55,6 +93,12 @@ fn main() {
     let mut a = Vec::new();
     callback(|| {
         a.push(3);
+    });
+    let mut a = Vec::new();
+    callback(|| {
+        callback(|| {
+            a.push(3);
+        });
     });
     let (mut a, b) = (1, 2);
     a = 34;
@@ -88,5 +132,14 @@ fn callback<F>(f: F) where F: FnOnce() {}
 #[allow(unused_mut)]
 fn foo(mut a: isize) {
     let mut a = 3;
-    let mut b = vec!(2);
+    let mut b = vec![2];
+}
+
+// make sure the lint attribute can be turned off on let statements
+#[deny(unused_mut)]
+fn bar() {
+    #[allow(unused_mut)]
+    let mut a = 3;
+    let mut b = vec![2]; //[lexical]~ ERROR: variable does not need to be mutable
+                         //[nll]~^ ERROR: variable does not need to be mutable
 }

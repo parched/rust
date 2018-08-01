@@ -8,9 +8,16 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-#![feature(rustc_attrs)]
+// revisions:lexical nll
+#![cfg_attr(nll, feature(nll))]
+
+// ignore-wasm32-bare compiled with panic=abort by default
+
+#![feature(generators, generator_trait, untagged_unions)]
+#![feature(slice_patterns)]
 
 use std::cell::{Cell, RefCell};
+use std::ops::Generator;
 use std::panic;
 use std::usize;
 
@@ -90,6 +97,34 @@ fn dynamic_drop(a: &Allocator, c: bool) {
     };
 }
 
+struct TwoPtrs<'a>(Ptr<'a>, Ptr<'a>);
+fn struct_dynamic_drop(a: &Allocator, c0: bool, c1: bool, c: bool) {
+    for i in 0..2 {
+        let x;
+        let y;
+        if (c0 && i == 0) || (c1 && i == 1) {
+            x = (a.alloc(), a.alloc(), a.alloc());
+            y = TwoPtrs(a.alloc(), a.alloc());
+            if c {
+                drop(x.1);
+                drop(y.0);
+            }
+        }
+    }
+}
+
+fn field_assignment(a: &Allocator, c0: bool) {
+    let mut x = (TwoPtrs(a.alloc(), a.alloc()), a.alloc());
+
+    x.1 = a.alloc();
+    x.1 = a.alloc();
+
+    let f = (x.0).0;
+    if c0 {
+        (x.0).0 = f;
+    }
+}
+
 fn assignment2(a: &Allocator, c0: bool, c1: bool) {
     let mut _v = a.alloc();
     let mut _w = a.alloc();
@@ -109,6 +144,123 @@ fn assignment1(a: &Allocator, c0: bool) {
         drop(_v);
     }
     _v = _w;
+}
+
+#[allow(unions_with_drop_fields)]
+union Boxy<T> {
+    a: T,
+    b: T,
+}
+
+fn union1(a: &Allocator) {
+    unsafe {
+        let mut u = Boxy { a: a.alloc() };
+        u.b = a.alloc();
+        drop(u.a);
+    }
+}
+
+fn array_simple(a: &Allocator) {
+    let _x = [a.alloc(), a.alloc(), a.alloc(), a.alloc()];
+}
+
+fn vec_simple(a: &Allocator) {
+    let _x = vec![a.alloc(), a.alloc(), a.alloc(), a.alloc()];
+}
+
+fn generator(a: &Allocator, run_count: usize) {
+    assert!(run_count < 4);
+
+    let mut gen = || {
+        (a.alloc(),
+         yield a.alloc(),
+         a.alloc(),
+         yield a.alloc()
+         );
+    };
+    for _ in 0..run_count {
+        unsafe { gen.resume(); }
+    }
+}
+
+fn mixed_drop_and_nondrop(a: &Allocator) {
+    // check that destructor panics handle drop
+    // and non-drop blocks in the same scope correctly.
+    //
+    // Surprisingly enough, this used to not work.
+    let (x, y, z);
+    x = a.alloc();
+    y = 5;
+    z = a.alloc();
+}
+
+#[allow(unreachable_code)]
+fn vec_unreachable(a: &Allocator) {
+    let _x = vec![a.alloc(), a.alloc(), a.alloc(), return];
+}
+
+fn slice_pattern_first(a: &Allocator) {
+    let[_x, ..] = [a.alloc(), a.alloc(), a.alloc()];
+}
+
+fn slice_pattern_middle(a: &Allocator) {
+    let[_, _x, _] = [a.alloc(), a.alloc(), a.alloc()];
+}
+
+fn slice_pattern_two(a: &Allocator) {
+    let[_x, _, _y, _] = [a.alloc(), a.alloc(), a.alloc(), a.alloc()];
+}
+
+fn slice_pattern_last(a: &Allocator) {
+    let[.., _y] = [a.alloc(), a.alloc(), a.alloc(), a.alloc()];
+}
+
+fn slice_pattern_one_of(a: &Allocator, i: usize) {
+    let array = [a.alloc(), a.alloc(), a.alloc(), a.alloc()];
+    let _x = match i {
+        0 => { let [a, ..] = array; a }
+        1 => { let [_, a, ..] = array; a }
+        2 => { let [_, _, a, _] = array; a }
+        3 => { let [_, _, _, a] = array; a }
+        _ => panic!("unmatched"),
+    };
+}
+
+fn subslice_pattern_from_end(a: &Allocator, arg: bool) {
+    let a = [a.alloc(), a.alloc(), a.alloc()];
+    if arg {
+        let[.., _x, _] = a;
+    } else {
+        let[_, _y..] = a;
+    }
+}
+
+fn subslice_pattern_from_end_with_drop(a: &Allocator, arg: bool, arg2: bool) {
+    let a = [a.alloc(), a.alloc(), a.alloc(), a.alloc(), a.alloc()];
+    if arg2 {
+        drop(a);
+        return;
+    }
+
+    if arg {
+        let[.., _x, _] = a;
+    } else {
+        let[_, _y..] = a;
+    }
+}
+
+fn slice_pattern_reassign(a: &Allocator) {
+    let mut ar = [a.alloc(), a.alloc()];
+    let[_, _x] = ar;
+    ar = [a.alloc(), a.alloc()];
+    let[.., _y] = ar;
+}
+
+fn subslice_pattern_reassign(a: &Allocator) {
+    let mut ar = [a.alloc(), a.alloc(), a.alloc()];
+    let[_, _, _x] = ar;
+    ar = [a.alloc(), a.alloc(), a.alloc()];
+    let[_, _y..] = ar;
 }
 
 fn run_test<F>(mut f: F)
@@ -136,6 +288,13 @@ fn run_test<F>(mut f: F)
     }
 }
 
+fn run_test_nopanic<F>(mut f: F)
+    where F: FnMut(&Allocator)
+{
+    let first_alloc = Allocator::new(usize::MAX);
+    f(&first_alloc);
+}
+
 fn main() {
     run_test(|a| dynamic_init(a, false));
     run_test(|a| dynamic_init(a, true));
@@ -149,4 +308,47 @@ fn main() {
 
     run_test(|a| assignment1(a, false));
     run_test(|a| assignment1(a, true));
+
+    run_test(|a| array_simple(a));
+    run_test(|a| vec_simple(a));
+    run_test(|a| vec_unreachable(a));
+
+    run_test(|a| struct_dynamic_drop(a, false, false, false));
+    run_test(|a| struct_dynamic_drop(a, false, false, true));
+    run_test(|a| struct_dynamic_drop(a, false, true, false));
+    run_test(|a| struct_dynamic_drop(a, false, true, true));
+    run_test(|a| struct_dynamic_drop(a, true, false, false));
+    run_test(|a| struct_dynamic_drop(a, true, false, true));
+    run_test(|a| struct_dynamic_drop(a, true, true, false));
+    run_test(|a| struct_dynamic_drop(a, true, true, true));
+
+    run_test(|a| field_assignment(a, false));
+    run_test(|a| field_assignment(a, true));
+
+    run_test(|a| generator(a, 0));
+    run_test(|a| generator(a, 1));
+    run_test(|a| generator(a, 2));
+    run_test(|a| generator(a, 3));
+
+    run_test(|a| mixed_drop_and_nondrop(a));
+
+    run_test(|a| slice_pattern_first(a));
+    run_test(|a| slice_pattern_middle(a));
+    run_test(|a| slice_pattern_two(a));
+    run_test(|a| slice_pattern_last(a));
+    run_test(|a| slice_pattern_one_of(a, 0));
+    run_test(|a| slice_pattern_one_of(a, 1));
+    run_test(|a| slice_pattern_one_of(a, 2));
+    run_test(|a| slice_pattern_one_of(a, 3));
+
+    run_test(|a| subslice_pattern_from_end(a, true));
+    run_test(|a| subslice_pattern_from_end(a, false));
+    run_test(|a| subslice_pattern_from_end_with_drop(a, true, true));
+    run_test(|a| subslice_pattern_from_end_with_drop(a, true, false));
+    run_test(|a| subslice_pattern_from_end_with_drop(a, false, true));
+    run_test(|a| subslice_pattern_from_end_with_drop(a, false, false));
+    run_test(|a| slice_pattern_reassign(a));
+    run_test(|a| subslice_pattern_reassign(a));
+
+    run_test_nopanic(|a| union1(a));
 }

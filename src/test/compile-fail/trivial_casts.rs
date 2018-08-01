@@ -52,31 +52,32 @@ pub fn main() {
     let _: *mut [u32] = x;
 
     let x: Box<[u32; 3]> = Box::new([42, 43, 44]);
-    let _ = x as Box<[u32]>; //~ERROR trivial cast: `Box<[u32; 3]>` as `Box<[u32]>`
+    let _ = x as Box<[u32]>;
+    //~^ ERROR trivial cast: `std::boxed::Box<[u32; 3]>` as `std::boxed::Box<[u32]>`
     let x: Box<[u32; 3]> = Box::new([42, 43, 44]);
     let _: Box<[u32]> = x;
 
     // unsize trait
     let x: &Bar = &Bar;
-    let _ = x as &Foo; //~ERROR trivial cast: `&Bar` as `&Foo`
-    let _ = x as *const Foo; //~ERROR trivial cast: `&Bar` as `*const Foo`
+    let _ = x as &Foo; //~ERROR trivial cast: `&Bar` as `&dyn Foo`
+    let _ = x as *const Foo; //~ERROR trivial cast: `&Bar` as `*const dyn Foo`
     let _: &Foo = x;
     let _: *const Foo = x;
 
     let x: &mut Bar = &mut Bar;
-    let _ = x as &mut Foo; //~ERROR trivial cast: `&mut Bar` as `&mut Foo`
-    let _ = x as *mut Foo; //~ERROR trivial cast: `&mut Bar` as `*mut Foo`
+    let _ = x as &mut Foo; //~ERROR trivial cast: `&mut Bar` as `&mut dyn Foo`
+    let _ = x as *mut Foo; //~ERROR trivial cast: `&mut Bar` as `*mut dyn Foo`
     let _: &mut Foo = x;
     let _: *mut Foo = x;
 
     let x: Box<Bar> = Box::new(Bar);
-    let _ = x as Box<Foo>; //~ERROR trivial cast: `Box<Bar>` as `Box<Foo>`
+    let _ = x as Box<Foo>; //~ERROR `std::boxed::Box<Bar>` as `std::boxed::Box<dyn Foo>`
     let x: Box<Bar> = Box::new(Bar);
     let _: Box<Foo> = x;
 
     // functions
     fn baz(_x: i32) {}
-    let _ = &baz as &Fn(i32); //~ERROR trivial cast: `&fn(i32) {main::baz}` as `&std::ops::Fn(i32)`
+    let _ = &baz as &Fn(i32); //~ERROR `&fn(i32) {main::baz}` as `&dyn std::ops::Fn(i32)`
     let _: &Fn(i32) = &baz;
     let x = |_x: i32| {};
     let _ = &x as &Fn(i32); //~ERROR trivial cast

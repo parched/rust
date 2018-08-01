@@ -22,7 +22,7 @@ mod rustrt {
     #[cfg(bogus)]
     extern {
         // This symbol doesn't exist and would be a link error if this
-        // module was translated
+        // module was codegened
         pub fn bogus();
     }
 
@@ -148,3 +148,6 @@ mod test_methods {
         fn the(&self);
     }
 }
+
+#[cfg(any())]
+mod nonexistent_file; // Check that unconfigured non-inline modules are not loaded or parsed.

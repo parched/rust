@@ -10,8 +10,6 @@
 
 // aux-build:pub_restricted.rs
 
-#![feature(pub_restricted)]
-#![deny(private_in_public)]
 #![allow(warnings)]
 extern crate pub_restricted;
 
@@ -30,7 +28,7 @@ mod foo {
     fn f() {
         use foo::bar::S;
         pub(self) use foo::bar::f; // ok
-        pub(super) use foo::bar::f as g; //~ ERROR cannot be reexported
+        pub(super) use foo::bar::f as g; //~ ERROR cannot be re-exported
         S::default().x; // ok
         S::default().f(); // ok
         S::g(); // ok
@@ -52,11 +50,13 @@ fn main() {
     let u = Universe::default();
     let _ = u.x;
     let _ = u.y; //~ ERROR private
+    let _ = u.z; //~ ERROR private
     u.f();
     u.g(); //~ ERROR private
+    u.h(); //~ ERROR private
 }
 
 mod pathological {
-    pub(bad::path) mod m1 {} //~ ERROR failed to resolve module path
-    pub(foo) mod m2 {} //~ ERROR visibilities can only be restricted to ancestor modules
+    pub(in bad::path) mod m1 {} //~ ERROR failed to resolve. Maybe a missing `extern crate bad;`?
+    pub(in foo) mod m2 {} //~ ERROR visibilities can only be restricted to ancestor modules
 }

@@ -8,8 +8,8 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-// ignore-aarch64
-// ignore-emscripten
+// ignore-cloudabi no processes
+// ignore-emscripten no processes
 
 use std::process::Command;
 use std::env;

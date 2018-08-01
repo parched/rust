@@ -11,8 +11,8 @@
 //! rustbuild, the Rust build system
 //!
 //! This is the entry point for the build system used to compile the `rustc`
-//! compiler. Lots of documentation can be found in the `README.md` file next to
-//! this file, and otherwise documentation can be found throughout the `build`
+//! compiler. Lots of documentation can be found in the `README.md` file in the
+//! parent directory, and otherwise documentation can be found throughout the `build`
 //! directory in each respective module.
 
 #![deny(warnings)]
@@ -21,17 +21,10 @@ extern crate bootstrap;
 
 use std::env;
 
-use bootstrap::{Flags, Config, Build};
+use bootstrap::{Config, Build};
 
 fn main() {
     let args = env::args().skip(1).collect::<Vec<_>>();
-    let flags = Flags::parse(&args);
-    let mut config = Config::parse(&flags.build, flags.config.clone());
-
-    // compat with `./configure` while we're still using that
-    if std::fs::metadata("config.mk").is_ok() {
-        config.update_with_config_mk();
-    }
-
-    Build::new(flags, config).build();
+    let config = Config::parse(&args);
+    Build::new(config).build();
 }

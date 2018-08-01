@@ -8,7 +8,6 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-#![feature(untagged_unions)]
 #![allow(unused)]
 #![deny(improper_ctypes)]
 
@@ -23,7 +22,7 @@ union W {
 
 extern "C" {
     static FOREIGN1: U; // OK
-    static FOREIGN2: W; //~ ERROR found union without foreign-function-safe representation
+    static FOREIGN2: W; //~ ERROR union has unspecified layout
 }
 
 fn main() {}

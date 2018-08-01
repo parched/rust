@@ -19,25 +19,21 @@ extern crate syntax_pos;
 
 use syntax::ast;
 use syntax::codemap;
-use syntax::parse;
 use syntax::print::pprust;
+use syntax::symbol::Symbol;
 use syntax_pos::DUMMY_SP;
 
 fn main() {
-    let ps = syntax::parse::ParseSess::new();
-    let mut loader = syntax::ext::base::DummyMacroLoader;
+    syntax::with_globals(|| run());
+}
+
+fn run() {
+    let ps = syntax::parse::ParseSess::new(codemap::FilePathMapping::empty());
+    let mut resolver = syntax::ext::base::DummyResolver;
     let mut cx = syntax::ext::base::ExtCtxt::new(
-        &ps, vec![],
+        &ps,
         syntax::ext::expand::ExpansionConfig::default("qquote".to_string()),
-        &mut loader);
-    cx.bt_push(syntax::codemap::ExpnInfo {
-        call_site: DUMMY_SP,
-        callee: syntax::codemap::NameAndSpan {
-            format: syntax::codemap::MacroBang(parse::token::intern("")),
-            allow_internal_unstable: false,
-            span: None,
-        }
-    });
+        &mut resolver);
     let cx = &mut cx;
 
     println!("{}", pprust::expr_to_string(&*quote_expr!(&cx, 23)));

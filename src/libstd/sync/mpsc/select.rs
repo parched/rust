@@ -93,7 +93,7 @@ pub struct Handle<'rx, T:Send+'rx> {
     next: *mut Handle<'static, ()>,
     prev: *mut Handle<'static, ()>,
     added: bool,
-    packet: &'rx (Packet+'rx),
+    packet: &'rx (dyn Packet+'rx),
 
     // due to our fun transmutes, we be sure to place this at the end. (nothing
     // previous relies on T)
@@ -103,7 +103,7 @@ pub struct Handle<'rx, T:Send+'rx> {
 struct Packets { cur: *mut Handle<'static, ()> }
 
 #[doc(hidden)]
-#[derive(PartialEq)]
+#[derive(PartialEq, Eq)]
 pub enum StartResult {
     Installed,
     Abort,
@@ -148,12 +148,12 @@ impl Select {
         let id = self.next_id.get();
         self.next_id.set(id + 1);
         Handle {
-            id: id,
+            id,
             selector: self.inner.get(),
             next: ptr::null_mut(),
             prev: ptr::null_mut(),
             added: false,
-            rx: rx,
+            rx,
             packet: rx,
         }
     }
@@ -352,22 +352,20 @@ impl Iterator for Packets {
     }
 }
 
-#[stable(feature = "mpsc_debug", since = "1.7.0")]
 impl fmt::Debug for Select {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "Select {{ .. }}")
+        f.debug_struct("Select").finish()
     }
 }
 
-#[stable(feature = "mpsc_debug", since = "1.7.0")]
 impl<'rx, T:Send+'rx> fmt::Debug for Handle<'rx, T> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "Handle {{ .. }}")
+        f.debug_struct("Handle").finish()
     }
 }
 
-#[cfg(test)]
 #[allow(unused_imports)]
+#[cfg(all(test, not(target_os = "emscripten")))]
 mod tests {
     use thread;
     use sync::mpsc::*;
@@ -520,6 +518,7 @@ mod tests {
         }
     }
 
+    #[allow(unused_must_use)]
     #[test]
     fn cloning() {
         let (tx1, rx1) = channel::<i32>();
@@ -542,6 +541,7 @@ mod tests {
         tx3.send(()).unwrap();
     }
 
+    #[allow(unused_must_use)]
     #[test]
     fn cloning2() {
         let (tx1, rx1) = channel::<i32>();
@@ -775,19 +775,5 @@ mod tests {
                 assert_eq!(rx1.recv().unwrap(), 1);
             }
         }
-    }
-
-    #[test]
-    fn fmt_debug_select() {
-        let sel = Select::new();
-        assert_eq!(format!("{:?}", sel), "Select { .. }");
-    }
-
-    #[test]
-    fn fmt_debug_handle() {
-        let (_, rx) = channel::<i32>();
-        let sel = Select::new();
-        let handle = sel.handle(&rx);
-        assert_eq!(format!("{:?}", handle), "Handle { .. }");
     }
 }

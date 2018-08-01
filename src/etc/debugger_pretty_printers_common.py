@@ -45,6 +45,9 @@ TYPE_KIND_SINGLETON_ENUM    = 13
 TYPE_KIND_CSTYLE_ENUM       = 14
 TYPE_KIND_PTR               = 15
 TYPE_KIND_FIXED_SIZE_VEC    = 16
+TYPE_KIND_REGULAR_UNION     = 17
+TYPE_KIND_OS_STRING         = 18
+TYPE_KIND_STD_VECDEQUE      = 19
 
 ENCODED_ENUM_PREFIX = "RUST$ENCODED$ENUM$"
 ENUM_DISR_FIELD_NAME = "RUST$ENUM$DISR"
@@ -60,8 +63,19 @@ STD_VEC_FIELD_NAME_BUF = "buf"
 STD_VEC_FIELD_NAMES = [STD_VEC_FIELD_NAME_BUF,
                        STD_VEC_FIELD_NAME_LENGTH]
 
+# std::collections::VecDeque<> related constants
+STD_VECDEQUE_FIELD_NAME_TAIL = "tail"
+STD_VECDEQUE_FIELD_NAME_HEAD = "head"
+STD_VECDEQUE_FIELD_NAME_BUF = "buf"
+STD_VECDEQUE_FIELD_NAMES = [STD_VECDEQUE_FIELD_NAME_TAIL,
+                            STD_VECDEQUE_FIELD_NAME_HEAD,
+                            STD_VECDEQUE_FIELD_NAME_BUF]
+
 # std::String related constants
 STD_STRING_FIELD_NAMES = ["vec"]
+
+# std::ffi::OsString related constants
+OS_STRING_FIELD_NAMES = ["inner"]
 
 
 class Type(object):
@@ -156,10 +170,20 @@ class Type(object):
             self.__conforms_to_field_layout(STD_VEC_FIELD_NAMES)):
             return TYPE_KIND_STD_VEC
 
+        # STD COLLECTION VECDEQUE
+        if (unqualified_type_name.startswith("VecDeque<") and
+            self.__conforms_to_field_layout(STD_VECDEQUE_FIELD_NAMES)):
+            return TYPE_KIND_STD_VECDEQUE
+
         # STD STRING
         if (unqualified_type_name.startswith("String") and
             self.__conforms_to_field_layout(STD_STRING_FIELD_NAMES)):
             return TYPE_KIND_STD_STRING
+
+        # OS STRING
+        if (unqualified_type_name == "OsString" and
+            self.__conforms_to_field_layout(OS_STRING_FIELD_NAMES)):
+            return TYPE_KIND_OS_STRING
 
         # ENUM VARIANTS
         if fields[0].name == ENUM_DISR_FIELD_NAME:
@@ -188,15 +212,18 @@ class Type(object):
         union_member_count = len(union_members)
         if union_member_count == 0:
             return TYPE_KIND_EMPTY
-        elif union_member_count == 1:
-            first_variant_name = union_members[0].name
-            if first_variant_name is None:
+
+        first_variant_name = union_members[0].name
+        if first_variant_name is None:
+            if union_member_count == 1:
                 return TYPE_KIND_SINGLETON_ENUM
             else:
-                assert first_variant_name.startswith(ENCODED_ENUM_PREFIX)
-                return TYPE_KIND_COMPRESSED_ENUM
+                return TYPE_KIND_REGULAR_ENUM
+        elif first_variant_name.startswith(ENCODED_ENUM_PREFIX):
+            assert union_member_count == 1
+            return TYPE_KIND_COMPRESSED_ENUM
         else:
-            return TYPE_KIND_REGULAR_ENUM
+            return TYPE_KIND_REGULAR_UNION
 
 
     def __conforms_to_field_layout(self, expected_fields):
@@ -312,6 +339,25 @@ def extract_length_ptr_and_cap_from_std_vec(vec_val):
     assert data_ptr.type.get_dwarf_type_kind() == DWARF_TYPE_CODE_PTR
     return (length, data_ptr, capacity)
 
+
+def extract_tail_head_ptr_and_cap_from_std_vecdeque(vec_val):
+    assert vec_val.type.get_type_kind() == TYPE_KIND_STD_VECDEQUE
+    tail_field_index = STD_VECDEQUE_FIELD_NAMES.index(STD_VECDEQUE_FIELD_NAME_TAIL)
+    head_field_index = STD_VECDEQUE_FIELD_NAMES.index(STD_VECDEQUE_FIELD_NAME_HEAD)
+    buf_field_index = STD_VECDEQUE_FIELD_NAMES.index(STD_VECDEQUE_FIELD_NAME_BUF)
+
+    tail = vec_val.get_child_at_index(tail_field_index).as_integer()
+    head = vec_val.get_child_at_index(head_field_index).as_integer()
+    buf = vec_val.get_child_at_index(buf_field_index)
+
+    vec_ptr_val = buf.get_child_at_index(0)
+    capacity = buf.get_child_at_index(1).as_integer()
+    unique_ptr_val = vec_ptr_val.get_child_at_index(0)
+    data_ptr = unique_ptr_val.get_child_at_index(0)
+    assert data_ptr.type.get_dwarf_type_kind() == DWARF_TYPE_CODE_PTR
+    return (tail, head, data_ptr, capacity)
+
+
 def extract_length_and_ptr_from_slice(slice_val):
     assert (slice_val.type.get_type_kind() == TYPE_KIND_SLICE or
             slice_val.type.get_type_kind() == TYPE_KIND_STR_SLICE)
@@ -328,7 +374,7 @@ def extract_length_and_ptr_from_slice(slice_val):
 UNQUALIFIED_TYPE_MARKERS = frozenset(["(", "[", "&", "*"])
 
 def extract_type_name(qualified_type_name):
-    '''Extracts the type name from a fully qualified path'''
+    """Extracts the type name from a fully qualified path"""
     if qualified_type_name[0] in UNQUALIFIED_TYPE_MARKERS:
         return qualified_type_name
 
@@ -341,3 +387,8 @@ def extract_type_name(qualified_type_name):
         return qualified_type_name
     else:
         return qualified_type_name[index + 2:]
+
+try:
+    compat_str = unicode  # Python 2
+except NameError:
+    compat_str = str

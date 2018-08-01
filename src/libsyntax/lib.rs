@@ -14,37 +14,35 @@
 //!
 //! This API is completely unstable and subject to change.
 
-#![crate_name = "syntax"]
-#![unstable(feature = "rustc_private", issue = "27812")]
-#![crate_type = "dylib"]
-#![crate_type = "rlib"]
 #![doc(html_logo_url = "https://www.rust-lang.org/logos/rust-logo-128x128-blk-v2.png",
        html_favicon_url = "https://doc.rust-lang.org/favicon.ico",
        html_root_url = "https://doc.rust-lang.org/nightly/",
        test(attr(deny(warnings))))]
-#![cfg_attr(not(stage0), deny(warnings))]
 
-#![feature(associated_consts)]
-#![feature(const_fn)]
-#![feature(libc)]
-#![feature(rustc_private)]
-#![feature(staged_api)]
-#![feature(str_escape)]
-#![feature(unicode)]
-#![feature(question_mark)]
+#![feature(const_atomic_usize_new)]
+#![feature(crate_visibility_modifier)]
+#![feature(macro_at_most_once_rep)]
+#![feature(rustc_attrs)]
 #![feature(rustc_diagnostic_macros)]
+#![feature(slice_sort_by_cached_key)]
+#![feature(str_escape)]
+#![feature(unicode_internals)]
 
+#![recursion_limit="256"]
+
+#[macro_use] extern crate bitflags;
+extern crate core;
 extern crate serialize;
-extern crate term;
-extern crate libc;
 #[macro_use] extern crate log;
-#[macro_use] #[no_link] extern crate rustc_bitflags;
-extern crate rustc_unicode;
 pub extern crate rustc_errors as errors;
 extern crate syntax_pos;
+extern crate rustc_data_structures;
+extern crate rustc_target;
+#[macro_use] extern crate scoped_tls;
 
 extern crate serialize as rustc_serialize; // used by deriving
 
+use rustc_data_structures::sync::Lock;
 
 // A variant of 'try!' that panics on an Err. This is used as a crutch on the
 // way towards a non-panic!-prone parser. It should be used for fatal parsing
@@ -60,11 +58,48 @@ macro_rules! panictry {
             Ok(e) => e,
             Err(mut e) => {
                 e.emit();
-                panic!(FatalError);
+                FatalError.raise()
             }
         }
     })
 }
+
+#[macro_export]
+macro_rules! unwrap_or {
+    ($opt:expr, $default:expr) => {
+        match $opt {
+            Some(x) => x,
+            None => $default,
+        }
+    }
+}
+
+pub struct Globals {
+    used_attrs: Lock<Vec<u64>>,
+    known_attrs: Lock<Vec<u64>>,
+    syntax_pos_globals: syntax_pos::Globals,
+}
+
+impl Globals {
+    fn new() -> Globals {
+        Globals {
+            used_attrs: Lock::new(Vec::new()),
+            known_attrs: Lock::new(Vec::new()),
+            syntax_pos_globals: syntax_pos::Globals::new(),
+        }
+    }
+}
+
+pub fn with_globals<F, R>(f: F) -> R
+    where F: FnOnce() -> R
+{
+    let globals = Globals::new();
+    GLOBALS.set(&globals, || {
+        syntax_pos::GLOBALS.set(&globals.syntax_pos_globals, f)
+    })
+}
+
+scoped_thread_local!(pub static GLOBALS: Globals);
 
 #[macro_use]
 pub mod diagnostics {
@@ -79,7 +114,6 @@ pub mod diagnostics {
 pub mod diagnostic_list;
 
 pub mod util {
-    pub mod interner;
     pub mod lev_distance;
     pub mod node_count;
     pub mod parser;
@@ -90,6 +124,9 @@ pub mod util {
 
     mod thin_vec;
     pub use self::thin_vec::ThinVec;
+
+    mod rc_slice;
+    pub use self::rc_slice::RcSlice;
 }
 
 pub mod json;
@@ -100,10 +137,10 @@ pub mod syntax {
     pub use ast;
 }
 
-pub mod abi;
 pub mod ast;
 pub mod attr;
 pub mod codemap;
+#[macro_use]
 pub mod config;
 pub mod entry;
 pub mod feature_gate;
@@ -113,6 +150,8 @@ pub mod ptr;
 pub mod show_span;
 pub mod std_inject;
 pub mod str;
+pub use syntax_pos::edition;
+pub use syntax_pos::symbol;
 pub mod test;
 pub mod tokenstream;
 pub mod visit;
@@ -123,11 +162,12 @@ pub mod print {
 }
 
 pub mod ext {
+    pub use syntax_pos::hygiene;
     pub mod base;
     pub mod build;
+    pub mod derive;
     pub mod expand;
-    pub mod hygiene;
-    pub mod proc_macro_shim;
+    pub mod placeholders;
     pub mod quote;
     pub mod source_util;
 
@@ -135,7 +175,13 @@ pub mod ext {
         pub mod transcribe;
         pub mod macro_parser;
         pub mod macro_rules;
+        pub mod quoted;
     }
 }
 
-// __build_diagnostic_array! { libsyntax, DIAGNOSTICS }
+pub mod early_buffered_lints;
+
+#[cfg(test)]
+mod test_snippet;
+
+__build_diagnostic_array! { libsyntax, DIAGNOSTICS }

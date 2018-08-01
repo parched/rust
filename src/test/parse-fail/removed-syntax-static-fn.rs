@@ -9,10 +9,11 @@
 // except according to those terms.
 
 // compile-flags: -Z parse-only
+// ignore-tidy-linelength
 
 struct S;
 
 impl S {
     static fn f() {}
 }
-//~^^ ERROR expected one of `const`, `default`, `extern`, `fn`, `pub`, `type`, `unsafe`, or `}`
+//~^^ ERROR expected one of `async`, `const`, `crate`, `default`, `existential`, `extern`, `fn`, `pub`, `type`,

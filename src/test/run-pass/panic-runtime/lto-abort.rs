@@ -10,6 +10,8 @@
 
 // compile-flags:-C lto -C panic=abort
 // no-prefer-dynamic
+// ignore-cloudabi no processes
+// ignore-emscripten no processes
 
 use std::process::Command;
 use std::env;

@@ -13,11 +13,12 @@
 // `y` module entirely (but not the `x` module).
 
 // revisions:rpass1 rpass2
+// compile-flags: -Z query-dep-graph
 
 #![feature(rustc_attrs)]
 
 #![rustc_partition_reused(module="spike", cfg="rpass2")]
-#![rustc_partition_translated(module="spike-x", cfg="rpass2")]
+#![rustc_partition_codegened(module="spike-x", cfg="rpass2")]
 #![rustc_partition_reused(module="spike-y", cfg="rpass2")]
 
 mod x {

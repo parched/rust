@@ -8,8 +8,12 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+// gate-test-use_extern_macros
+
+#![feature(proc_macro_path_invoc)]
+
 fn main() {
-    globnar::brotz!(); //~ ERROR expected macro name without module separators
-    ::foo!(); //~ ERROR expected macro name without module separators
-    foo::<T>!(); //~ ERROR expected macro name without module separators
+    globnar::brotz!(); //~ ERROR non-ident macro paths are experimental
+    #[derive(foo::Bar)] struct T; //~ ERROR non-ident macro paths are experimental
+    ::foo!(); //~ ERROR non-ident macro paths are experimental
 }

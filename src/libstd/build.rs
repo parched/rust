@@ -10,24 +10,22 @@
 
 #![deny(warnings)]
 
-extern crate gcc;
 extern crate build_helper;
+extern crate cc;
 
+use build_helper::native_lib_boilerplate;
 use std::env;
-use std::path::PathBuf;
-use std::process::Command;
-
-use build_helper::run;
+use std::fs::File;
 
 fn main() {
-    println!("cargo:rustc-cfg=cargobuild");
-    println!("cargo:rerun-if-changed=build.rs");
-
-    let target = env::var("TARGET").unwrap();
-    let host = env::var("HOST").unwrap();
-    if cfg!(feature = "backtrace") && !target.contains("apple") && !target.contains("msvc") &&
-        !target.contains("emscripten") {
-        build_libbacktrace(&host, &target);
+    let target = env::var("TARGET").expect("TARGET was not set");
+    if cfg!(feature = "backtrace") &&
+        !target.contains("cloudabi") &&
+        !target.contains("emscripten") &&
+        !target.contains("msvc") &&
+        !target.contains("wasm32")
+    {
+        let _ = build_libbacktrace(&target);
     }
 
     if target.contains("linux") {
@@ -35,7 +33,7 @@ fn main() {
             println!("cargo:rustc-link-lib=dl");
             println!("cargo:rustc-link-lib=log");
             println!("cargo:rustc-link-lib=gcc");
-        } else {
+        } else if !target.contains("musl") {
             println!("cargo:rustc-link-lib=dl");
             println!("cargo:rustc-link-lib=rt");
             println!("cargo:rustc-link-lib=pthread");
@@ -46,62 +44,90 @@ fn main() {
     } else if target.contains("dragonfly") || target.contains("bitrig") ||
               target.contains("netbsd") || target.contains("openbsd") {
         println!("cargo:rustc-link-lib=pthread");
+    } else if target.contains("solaris") {
+        println!("cargo:rustc-link-lib=socket");
+        println!("cargo:rustc-link-lib=posix4");
+        println!("cargo:rustc-link-lib=pthread");
+        println!("cargo:rustc-link-lib=resolv");
     } else if target.contains("apple-darwin") {
         println!("cargo:rustc-link-lib=System");
+
+        // res_init and friends require -lresolv on macOS/iOS.
+        // See #41582 and http://blog.achernya.com/2013/03/os-x-has-silly-libsystem.html
+        println!("cargo:rustc-link-lib=resolv");
     } else if target.contains("apple-ios") {
         println!("cargo:rustc-link-lib=System");
         println!("cargo:rustc-link-lib=objc");
         println!("cargo:rustc-link-lib=framework=Security");
         println!("cargo:rustc-link-lib=framework=Foundation");
+        println!("cargo:rustc-link-lib=resolv");
     } else if target.contains("windows") {
         println!("cargo:rustc-link-lib=advapi32");
         println!("cargo:rustc-link-lib=ws2_32");
         println!("cargo:rustc-link-lib=userenv");
         println!("cargo:rustc-link-lib=shell32");
+    } else if target.contains("fuchsia") {
+        println!("cargo:rustc-link-lib=zircon");
+        println!("cargo:rustc-link-lib=fdio");
+    } else if target.contains("cloudabi") {
+        if cfg!(feature = "backtrace") {
+            println!("cargo:rustc-link-lib=unwind");
+        }
+        println!("cargo:rustc-link-lib=c");
+        println!("cargo:rustc-link-lib=compiler_rt");
     }
 }
 
-fn build_libbacktrace(host: &str, target: &str) {
-    let src_dir = env::current_dir().unwrap().join("../libbacktrace");
-    let build_dir = PathBuf::from(env::var_os("OUT_DIR").unwrap());
+fn build_libbacktrace(target: &str) -> Result<(), ()> {
+    let native = native_lib_boilerplate("libbacktrace", "libbacktrace", "backtrace", "")?;
 
-    println!("cargo:rustc-link-lib=static=backtrace");
-    println!("cargo:rustc-link-search=native={}/.libs", build_dir.display());
+    let mut build = cc::Build::new();
+    build
+        .flag("-fvisibility=hidden")
+        .include("../libbacktrace")
+        .include(&native.out_dir)
+        .out_dir(&native.out_dir)
+        .warnings(false)
+        .file("../libbacktrace/alloc.c")
+        .file("../libbacktrace/backtrace.c")
+        .file("../libbacktrace/dwarf.c")
+        .file("../libbacktrace/fileline.c")
+        .file("../libbacktrace/posix.c")
+        .file("../libbacktrace/read.c")
+        .file("../libbacktrace/sort.c")
+        .file("../libbacktrace/state.c");
 
-    let mut stack = src_dir.read_dir().unwrap()
-                           .map(|e| e.unwrap())
-                           .collect::<Vec<_>>();
-    while let Some(entry) = stack.pop() {
-        let path = entry.path();
-        if entry.file_type().unwrap().is_dir() {
-            stack.extend(path.read_dir().unwrap().map(|e| e.unwrap()));
+    if target.contains("darwin") {
+        build.file("../libbacktrace/macho.c");
+    } else if target.contains("windows") {
+        build.file("../libbacktrace/pecoff.c");
+    } else {
+        build.file("../libbacktrace/elf.c");
+
+        if target.contains("64") {
+            build.define("BACKTRACE_ELF_SIZE", "64");
         } else {
-            println!("cargo:rerun-if-changed={}", path.display());
+            build.define("BACKTRACE_ELF_SIZE", "32");
         }
     }
 
-    let compiler = gcc::Config::new().get_compiler();
-    // only msvc returns None for ar so unwrap is okay
-    let ar = build_helper::cc2ar(compiler.path(), target).unwrap();
-    let cflags = compiler.args().iter().map(|s| s.to_str().unwrap())
-                         .collect::<Vec<_>>().join(" ");
-    run(Command::new("sh")
-                .current_dir(&build_dir)
-                .arg(src_dir.join("configure").to_str().unwrap()
-                            .replace("C:\\", "/c/")
-                            .replace("\\", "/"))
-                .arg("--with-pic")
-                .arg("--disable-multilib")
-                .arg("--disable-shared")
-                .arg("--disable-host-shared")
-                .arg(format!("--host={}", build_helper::gnu_target(target)))
-                .arg(format!("--build={}", build_helper::gnu_target(host)))
-                .env("CC", compiler.path())
-                .env("AR", &ar)
-                .env("RANLIB", format!("{} s", ar.display()))
-                .env("CFLAGS", cflags));
-    run(Command::new("make")
-                .current_dir(&build_dir)
-                .arg(format!("INCDIR={}", src_dir.display()))
-                .arg("-j").arg(env::var("NUM_JOBS").unwrap()));
+    File::create(native.out_dir.join("backtrace-supported.h")).unwrap();
+    build.define("BACKTRACE_SUPPORTED", "1");
+    build.define("BACKTRACE_USES_MALLOC", "1");
+    build.define("BACKTRACE_SUPPORTS_THREADS", "0");
+    build.define("BACKTRACE_SUPPORTS_DATA", "0");
+
+    File::create(native.out_dir.join("config.h")).unwrap();
+    if !target.contains("apple-ios") &&
+       !target.contains("solaris") &&
+       !target.contains("redox") &&
+       !target.contains("android") &&
+       !target.contains("haiku") {
+        build.define("HAVE_DL_ITERATE_PHDR", "1");
+    }
+    build.define("_GNU_SOURCE", "1");
+    build.define("_LARGE_FILES", "1");
+
+    build.compile("backtrace");
+    Ok(())
 }

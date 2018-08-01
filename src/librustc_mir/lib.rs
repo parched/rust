@@ -14,39 +14,77 @@ Rust MIR: a lowered representation of Rust. Also: an experiment!
 
 */
 
-#![crate_name = "rustc_mir"]
-#![crate_type = "rlib"]
-#![crate_type = "dylib"]
-#![cfg_attr(not(stage0), deny(warnings))]
-#![unstable(feature = "rustc_private", issue = "27812")]
-
-#![feature(associated_consts)]
+#![feature(infer_outlives_requirements)]
+#![feature(in_band_lifetimes)]
+#![feature(slice_patterns)]
+#![feature(slice_sort_by_cached_key)]
+#![feature(from_ref)]
 #![feature(box_patterns)]
+#![feature(box_syntax)]
+#![feature(catch_expr)]
+#![feature(crate_visibility_modifier)]
+#![feature(const_fn)]
+#![feature(core_intrinsics)]
+#![feature(decl_macro)]
+#![feature(fs_read_write)]
+#![feature(in_band_lifetimes)]
+#![feature(macro_vis_matcher)]
+#![feature(exhaustive_patterns)]
+#![feature(range_contains)]
 #![feature(rustc_diagnostic_macros)]
-#![feature(rustc_private)]
-#![feature(staged_api)]
-#![feature(question_mark)]
+#![feature(crate_visibility_modifier)]
+#![feature(never_type)]
+#![feature(specialization)]
+#![feature(try_trait)]
+#![feature(unicode_internals)]
+#![feature(step_trait)]
 
+#![recursion_limit="256"]
+
+extern crate arena;
+
+#[macro_use]
+extern crate bitflags;
 #[macro_use] extern crate log;
+extern crate either;
 extern crate graphviz as dot;
+extern crate polonius_engine;
 #[macro_use]
 extern crate rustc;
-extern crate rustc_data_structures;
-extern crate rustc_back;
-#[macro_use]
-#[no_link]
-extern crate rustc_bitflags;
+#[macro_use] extern crate rustc_data_structures;
+extern crate serialize as rustc_serialize;
+extern crate rustc_errors;
 #[macro_use]
 extern crate syntax;
 extern crate syntax_pos;
-extern crate rustc_const_math;
-extern crate rustc_const_eval;
+extern crate rustc_target;
+extern crate log_settings;
+extern crate rustc_apfloat;
+extern crate byteorder;
+extern crate core;
 
-pub mod diagnostics;
+mod diagnostics;
 
-pub mod build;
-pub mod graphviz;
+mod borrow_check;
+mod build;
+mod dataflow;
 mod hair;
-pub mod mir_map;
-pub mod pretty;
+mod shim;
 pub mod transform;
+pub mod util;
+pub mod interpret;
+pub mod monomorphize;
+
+pub use hair::pattern::check_crate as matchck_crate;
+use rustc::ty::query::Providers;
+
+pub fn provide(providers: &mut Providers) {
+    borrow_check::provide(providers);
+    shim::provide(providers);
+    transform::provide(providers);
+    providers.const_eval = interpret::const_eval_provider;
+    providers.const_value_to_allocation = interpret::const_value_to_allocation_provider;
+    providers.check_match = hair::pattern::check_match;
+}
+
+__build_diagnostic_array! { librustc_mir, DIAGNOSTICS }

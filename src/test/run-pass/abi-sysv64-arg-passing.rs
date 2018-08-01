@@ -39,7 +39,6 @@
 
 // note: windows is ignored as rust_test_helpers does not have the sysv64 abi on windows
 
-#![feature(abi_sysv64)]
 #[allow(dead_code)]
 #[allow(improper_ctypes)]
 
@@ -98,7 +97,7 @@ mod tests {
     #[derive(Copy, Clone)]
     pub struct Floats { a: f64, b: u8, c: f64 }
 
-    #[link(name = "rust_test_helpers")]
+    #[link(name = "rust_test_helpers", kind = "static")]
     extern "sysv64" {
         pub fn rust_int8_to_int32(_: i8) -> i32;
         pub fn rust_dbg_extern_identity_u8(v: u8) -> u8;

@@ -13,7 +13,6 @@
 #![allow(dead_code)]
 #![feature(rustc_attrs)]
 #![feature(unboxed_closures)]
-#![deny(hr_lifetime_in_assoc_type)]
 
 trait Foo {
     type Item;
@@ -22,27 +21,23 @@ trait Foo {
 #[cfg(sig)]
 fn sig1(_: for<'a> fn() -> &'a i32) {
     //[sig]~^ ERROR return type references lifetime `'a`
-    //[sig]~| WARNING previously accepted
 }
 
 #[cfg(sig)]
 fn sig2(_: for<'a, 'b> fn(&'b i32) -> &'a i32) {
     //[sig]~^ ERROR return type references lifetime `'a`
-    //[sig]~| WARNING previously accepted
 }
 
 #[cfg(local)]
 fn local1() {
     let _: for<'a> fn() -> &'a i32 = loop { };
     //[local]~^ ERROR return type references lifetime `'a`
-    //[local]~| WARNING previously accepted
 }
 
 #[cfg(structure)]
 struct Struct1 {
     x: for<'a> fn() -> &'a i32
     //[structure]~^ ERROR return type references lifetime `'a`
-    //[structure]~| WARNING previously accepted
 }
 
 #[cfg(elision)]

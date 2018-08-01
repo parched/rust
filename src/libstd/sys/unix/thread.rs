@@ -8,7 +8,7 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-use alloc::boxed::FnBox;
+use boxed::FnBox;
 use cmp;
 use ffi::CStr;
 use io;
@@ -20,6 +20,11 @@ use time::Duration;
 
 use sys_common::thread::*;
 
+#[cfg(not(target_os = "l4re"))]
+pub const DEFAULT_MIN_STACK_SIZE: usize = 2 * 1024 * 1024;
+#[cfg(target_os = "l4re")]
+pub const DEFAULT_MIN_STACK_SIZE: usize = 1024 * 1024;
+
 pub struct Thread {
     id: libc::pthread_t,
 }
@@ -29,8 +34,22 @@ pub struct Thread {
 unsafe impl Send for Thread {}
 unsafe impl Sync for Thread {}
 
+// The pthread_attr_setstacksize symbol doesn't exist in the emscripten libc,
+// so we have to not link to it to satisfy emcc's ERROR_ON_UNDEFINED_SYMBOLS.
+#[cfg(not(target_os = "emscripten"))]
+unsafe fn pthread_attr_setstacksize(attr: *mut libc::pthread_attr_t,
+                                    stack_size: libc::size_t) -> libc::c_int {
+    libc::pthread_attr_setstacksize(attr, stack_size)
+}
+
+#[cfg(target_os = "emscripten")]
+unsafe fn pthread_attr_setstacksize(_attr: *mut libc::pthread_attr_t,
+                                    _stack_size: libc::size_t) -> libc::c_int {
+    panic!()
+}
+
 impl Thread {
-    pub unsafe fn new<'a>(stack: usize, p: Box<FnBox() + 'a>)
+    pub unsafe fn new<'a>(stack: usize, p: Box<dyn FnBox() + 'a>)
                           -> io::Result<Thread> {
         let p = box p;
         let mut native: libc::pthread_t = mem::zeroed();
@@ -38,8 +57,9 @@ impl Thread {
         assert_eq!(libc::pthread_attr_init(&mut attr), 0);
 
         let stack_size = cmp::max(stack, min_stack_size(&attr));
-        match libc::pthread_attr_setstacksize(&mut attr,
-                                              stack_size as libc::size_t) {
+
+        match pthread_attr_setstacksize(&mut attr,
+                                        stack_size) {
             0 => {}
             n => {
                 assert_eq!(n, libc::EINVAL);
@@ -50,7 +70,6 @@ impl Thread {
                 let page_size = os::page_size();
                 let stack_size = (stack_size + page_size - 1) &
                                  (-(page_size as isize - 1) as usize - 1);
-                let stack_size = stack_size as libc::size_t;
                 assert_eq!(libc::pthread_attr_setstacksize(&mut attr,
                                                            stack_size), 0);
             }
@@ -68,7 +87,7 @@ impl Thread {
         };
 
         extern fn thread_start(main: *mut libc::c_void) -> *mut libc::c_void {
-            unsafe { start_thread(main); }
+            unsafe { start_thread(main as *mut u8); }
             ptr::null_mut()
         }
     }
@@ -115,14 +134,23 @@ impl Thread {
                                      name.as_ptr() as *mut libc::c_void);
         }
     }
-    #[cfg(any(target_env = "newlib", target_os = "solaris", target_os = "emscripten"))]
+    #[cfg(any(target_env = "newlib",
+              target_os = "solaris",
+              target_os = "haiku",
+              target_os = "l4re",
+              target_os = "emscripten",
+              target_os = "hermit"))]
     pub fn set_name(_name: &CStr) {
-        // Newlib, Illumos and Emscripten have no way to set a thread name.
+        // Newlib, Illumos, Haiku, and Emscripten have no way to set a thread name.
+    }
+    #[cfg(target_os = "fuchsia")]
+    pub fn set_name(_name: &CStr) {
+        // FIXME: determine whether Fuchsia has a way to set a thread name.
     }
 
     pub fn sleep(dur: Duration) {
         let mut secs = dur.as_secs();
-        let mut nsecs = dur.subsec_nanos() as libc::c_long;
+        let mut nsecs = dur.subsec_nanos() as _;
 
         // If we're awoken with a signal then the return value will be -1 and
         // nanosleep will fill in `ts` with the remaining time.
@@ -148,7 +176,8 @@ impl Thread {
         unsafe {
             let ret = libc::pthread_join(self.id, ptr::null_mut());
             mem::forget(self);
-            debug_assert_eq!(ret, 0);
+            assert!(ret == 0,
+                    "failed to join thread: {}", io::Error::from_raw_os_error(ret));
         }
     }
 
@@ -177,8 +206,11 @@ impl Drop for Thread {
           not(target_os = "solaris")))]
 #[cfg_attr(test, allow(dead_code))]
 pub mod guard {
-    pub unsafe fn current() -> Option<usize> { None }
-    pub unsafe fn init() -> Option<usize> { None }
+    use ops::Range;
+    pub type Guard = Range<usize>;
+    pub unsafe fn current() -> Option<Guard> { None }
+    pub unsafe fn init() -> Option<Guard> { None }
+    pub unsafe fn deinit() {}
 }
 
 
@@ -192,20 +224,49 @@ pub mod guard {
 #[cfg_attr(test, allow(dead_code))]
 pub mod guard {
     use libc;
-    use libc::mmap;
-    use libc::{PROT_NONE, MAP_PRIVATE, MAP_ANON, MAP_FAILED, MAP_FIXED};
+    use libc::{mmap, mprotect};
+    use libc::{PROT_NONE, PROT_READ, PROT_WRITE, MAP_PRIVATE, MAP_ANON, MAP_FAILED, MAP_FIXED};
+    use ops::Range;
     use sys::os;
 
-    #[cfg(any(target_os = "macos",
-              target_os = "bitrig",
-              target_os = "openbsd",
-              target_os = "solaris"))]
+    // This is initialized in init() and only read from after
+    static mut PAGE_SIZE: usize = 0;
+
+    pub type Guard = Range<usize>;
+
+    #[cfg(target_os = "solaris")]
     unsafe fn get_stack_start() -> Option<*mut libc::c_void> {
-        current().map(|s| s as *mut libc::c_void)
+        let mut current_stack: libc::stack_t = ::mem::zeroed();
+        assert_eq!(libc::stack_getbounds(&mut current_stack), 0);
+        Some(current_stack.ss_sp)
+    }
+
+    #[cfg(target_os = "macos")]
+    unsafe fn get_stack_start() -> Option<*mut libc::c_void> {
+        let stackaddr = libc::pthread_get_stackaddr_np(libc::pthread_self()) as usize -
+             libc::pthread_get_stacksize_np(libc::pthread_self());
+        Some(stackaddr as *mut libc::c_void)
+    }
+
+    #[cfg(any(target_os = "openbsd", target_os = "bitrig"))]
+    unsafe fn get_stack_start() -> Option<*mut libc::c_void> {
+        let mut current_stack: libc::stack_t = ::mem::zeroed();
+        assert_eq!(libc::pthread_stackseg_np(libc::pthread_self(),
+                                             &mut current_stack), 0);
+
+        let extra = if cfg!(target_os = "bitrig") {3} else {1} * PAGE_SIZE;
+        let stackaddr = if libc::pthread_main_np() == 1 {
+            // main thread
+            current_stack.ss_sp as usize - current_stack.ss_size + extra
+        } else {
+            // new thread
+            current_stack.ss_sp as usize - current_stack.ss_size
+        };
+        Some(stackaddr as *mut libc::c_void)
     }
 
     #[cfg(any(target_os = "android", target_os = "freebsd",
-              target_os = "linux", target_os = "netbsd"))]
+              target_os = "linux", target_os = "netbsd", target_os = "l4re"))]
     unsafe fn get_stack_start() -> Option<*mut libc::c_void> {
         let mut ret = None;
         let mut attr: libc::pthread_attr_t = ::mem::zeroed();
@@ -225,12 +286,10 @@ pub mod guard {
         ret
     }
 
-    pub unsafe fn init() -> Option<usize> {
-        let psize = os::page_size();
-        let mut stackaddr = match get_stack_start() {
-            Some(addr) => addr,
-            None => return None,
-        };
+    // Precondition: PAGE_SIZE is initialized.
+    unsafe fn get_stack_start_aligned() -> Option<*mut libc::c_void> {
+        assert!(PAGE_SIZE != 0);
+        let stackaddr = get_stack_start()?;
 
         // Ensure stackaddr is page aligned! A parent process might
         // have reset RLIMIT_STACK to be non-page aligned. The
@@ -238,67 +297,95 @@ pub mod guard {
         // stackaddr < stackaddr + stacksize, so if stackaddr is not
         // page-aligned, calculate the fix such that stackaddr <
         // new_page_aligned_stackaddr < stackaddr + stacksize
-        let remainder = (stackaddr as usize) % psize;
-        if remainder != 0 {
-            stackaddr = ((stackaddr as usize) + psize - remainder)
-                as *mut libc::c_void;
-        }
-
-        // Rellocate the last page of the stack.
-        // This ensures SIGBUS will be raised on
-        // stack overflow.
-        let result = mmap(stackaddr,
-                          psize as libc::size_t,
-                          PROT_NONE,
-                          MAP_PRIVATE | MAP_ANON | MAP_FIXED,
-                          -1,
-                          0);
-
-        if result != stackaddr || result == MAP_FAILED {
-            panic!("failed to allocate a guard page");
-        }
-
-        let offset = if cfg!(any(target_os = "linux", target_os = "freebsd")) {
-            2
+        let remainder = (stackaddr as usize) % PAGE_SIZE;
+        Some(if remainder == 0 {
+            stackaddr
         } else {
-            1
-        };
-
-        Some(stackaddr as usize + offset * psize)
-    }
-
-    #[cfg(target_os = "solaris")]
-    pub unsafe fn current() -> Option<usize> {
-        let mut current_stack: libc::stack_t = ::mem::zeroed();
-        assert_eq!(libc::stack_getbounds(&mut current_stack), 0);
-        Some(current_stack.ss_sp as usize)
-    }
-
-    #[cfg(target_os = "macos")]
-    pub unsafe fn current() -> Option<usize> {
-        Some((libc::pthread_get_stackaddr_np(libc::pthread_self()) as libc::size_t -
-              libc::pthread_get_stacksize_np(libc::pthread_self())) as usize)
-    }
-
-    #[cfg(any(target_os = "openbsd", target_os = "bitrig"))]
-    pub unsafe fn current() -> Option<usize> {
-        let mut current_stack: libc::stack_t = ::mem::zeroed();
-        assert_eq!(libc::pthread_stackseg_np(libc::pthread_self(),
-                                             &mut current_stack), 0);
-
-        let extra = if cfg!(target_os = "bitrig") {3} else {1} * os::page_size();
-        Some(if libc::pthread_main_np() == 1 {
-            // main thread
-            current_stack.ss_sp as usize - current_stack.ss_size as usize + extra
-        } else {
-            // new thread
-            current_stack.ss_sp as usize - current_stack.ss_size as usize
+            ((stackaddr as usize) + PAGE_SIZE - remainder) as *mut libc::c_void
         })
     }
 
+    pub unsafe fn init() -> Option<Guard> {
+        PAGE_SIZE = os::page_size();
+
+        let stackaddr = get_stack_start_aligned()?;
+
+        if cfg!(target_os = "linux") {
+            // Linux doesn't allocate the whole stack right away, and
+            // the kernel has its own stack-guard mechanism to fault
+            // when growing too close to an existing mapping.  If we map
+            // our own guard, then the kernel starts enforcing a rather
+            // large gap above that, rendering much of the possible
+            // stack space useless.  See #43052.
+            //
+            // Instead, we'll just note where we expect rlimit to start
+            // faulting, so our handler can report "stack overflow", and
+            // trust that the kernel's own stack guard will work.
+            let stackaddr = stackaddr as usize;
+            Some(stackaddr - PAGE_SIZE..stackaddr)
+        } else {
+            // Reallocate the last page of the stack.
+            // This ensures SIGBUS will be raised on
+            // stack overflow.
+            // Systems which enforce strict PAX MPROTECT do not allow
+            // to mprotect() a mapping with less restrictive permissions
+            // than the initial mmap() used, so we mmap() here with
+            // read/write permissions and only then mprotect() it to
+            // no permissions at all. See issue #50313.
+            let result = mmap(stackaddr, PAGE_SIZE, PROT_READ | PROT_WRITE,
+                              MAP_PRIVATE | MAP_ANON | MAP_FIXED, -1, 0);
+            if result != stackaddr || result == MAP_FAILED {
+                panic!("failed to allocate a guard page");
+            }
+
+            let result = mprotect(stackaddr, PAGE_SIZE, PROT_NONE);
+            if result != 0 {
+                panic!("failed to protect the guard page");
+            }
+
+            let guardaddr = stackaddr as usize;
+            let offset = if cfg!(target_os = "freebsd") {
+                2
+            } else {
+                1
+            };
+
+            Some(guardaddr..guardaddr + offset * PAGE_SIZE)
+        }
+    }
+
+    pub unsafe fn deinit() {
+        if !cfg!(target_os = "linux") {
+            if let Some(stackaddr) = get_stack_start_aligned() {
+                // Remove the protection on the guard page.
+                // FIXME: we cannot unmap the page, because when we mmap()
+                // above it may be already mapped by the OS, which we can't
+                // detect from mmap()'s return value. If we unmap this page,
+                // it will lead to failure growing stack size on platforms like
+                // macOS. Instead, just restore the page to a writable state.
+                // This ain't Linux, so we probably don't need to care about
+                // execstack.
+                let result = mprotect(stackaddr, PAGE_SIZE, PROT_READ | PROT_WRITE);
+
+                if result != 0 {
+                    panic!("unable to reset the guard page");
+                }
+            }
+        }
+    }
+
+    #[cfg(any(target_os = "macos",
+              target_os = "bitrig",
+              target_os = "openbsd",
+              target_os = "solaris"))]
+    pub unsafe fn current() -> Option<Guard> {
+        let stackaddr = get_stack_start()? as usize;
+        Some(stackaddr - PAGE_SIZE..stackaddr)
+    }
+
     #[cfg(any(target_os = "android", target_os = "freebsd",
-              target_os = "linux", target_os = "netbsd"))]
-    pub unsafe fn current() -> Option<usize> {
+              target_os = "linux", target_os = "netbsd", target_os = "l4re"))]
+    pub unsafe fn current() -> Option<Guard> {
         let mut ret = None;
         let mut attr: libc::pthread_attr_t = ::mem::zeroed();
         assert_eq!(libc::pthread_attr_init(&mut attr), 0);
@@ -317,12 +404,23 @@ pub mod guard {
             assert_eq!(libc::pthread_attr_getstack(&attr, &mut stackaddr,
                                                    &mut size), 0);
 
+            let stackaddr = stackaddr as usize;
             ret = if cfg!(target_os = "freebsd") {
-                Some(stackaddr as usize - guardsize as usize)
+                // FIXME does freebsd really fault *below* the guard addr?
+                let guardaddr = stackaddr - guardsize;
+                Some(guardaddr - PAGE_SIZE..guardaddr)
             } else if cfg!(target_os = "netbsd") {
-                Some(stackaddr as usize)
+                Some(stackaddr - guardsize..stackaddr)
+            } else if cfg!(all(target_os = "linux", target_env = "gnu")) {
+                // glibc used to include the guard area within the stack, as noted in the BUGS
+                // section of `man pthread_attr_getguardsize`.  This has been corrected starting
+                // with glibc 2.27, and in some distro backports, so the guard is now placed at the
+                // end (below) the stack.  There's no easy way for us to know which we have at
+                // runtime, so we'll just match any fault in the range right above or below the
+                // stack base to call that fault a stack overflow.
+                Some(stackaddr - guardsize..stackaddr + guardsize)
             } else {
-                Some(stackaddr as usize + guardsize as usize)
+                Some(stackaddr..stackaddr + guardsize)
             };
         }
         assert_eq!(libc::pthread_attr_destroy(&mut attr), 0);
@@ -341,8 +439,8 @@ fn min_stack_size(attr: *const libc::pthread_attr_t) -> usize {
     weak!(fn __pthread_get_minstack(*const libc::pthread_attr_t) -> libc::size_t);
 
     match __pthread_get_minstack.get() {
-        None => libc::PTHREAD_STACK_MIN as usize,
-        Some(f) => unsafe { f(attr) as usize },
+        None => libc::PTHREAD_STACK_MIN,
+        Some(f) => unsafe { f(attr) },
     }
 }
 
@@ -351,7 +449,7 @@ fn min_stack_size(attr: *const libc::pthread_attr_t) -> usize {
 #[cfg(all(not(target_os = "linux"),
           not(target_os = "netbsd")))]
 fn min_stack_size(_: *const libc::pthread_attr_t) -> usize {
-    libc::PTHREAD_STACK_MIN as usize
+    libc::PTHREAD_STACK_MIN
 }
 
 #[cfg(target_os = "netbsd")]

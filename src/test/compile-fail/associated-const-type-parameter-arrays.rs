@@ -8,7 +8,6 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-#![feature(associated_consts)]
 
 pub trait Foo {
     const Y: usize;
@@ -26,7 +25,7 @@ impl Foo for Def {
 
 pub fn test<A: Foo, B: Foo>() {
     let _array: [u32; <A as Foo>::Y];
-    //~^ ERROR the trait bound `A: Foo` is not satisfied
+    //~^ ERROR the trait bound `A: Foo` is not satisfied [E0277]
 }
 
 fn main() {
