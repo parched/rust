@@ -3,4 +3,5 @@ build:
 #    image_name: drydockaarch64/u16cppall
 #    image_tag: v6.7.4
   ci:
+    - git submodule update --init --recursive
     - ./x.py build
