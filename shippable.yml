@@ -1,0 +1,5 @@
+build:
+  pre_ci_boot:
+    image_name: drydockaarch64/u16cppall
+  ci:
+    - ./x.py build
