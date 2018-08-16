@@ -31,6 +31,7 @@ use rustc::hir::def_id::{CrateNum, LOCAL_CRATE};
 use rustc::ty::TyCtxt;
 use rustc::util::common::{time_ext, time_depth, set_time_depth, print_time_passes_entry};
 use rustc_fs_util::{path2cstr, link_or_copy};
+use rustc_data_structures::small_c_str::SmallCStr;
 use errors::{self, Handler, Level, DiagnosticBuilder, FatalError, DiagnosticId};
 use errors::emitter::{Emitter};
 use syntax::attr;
@@ -170,17 +171,16 @@ pub fn target_machine_factory(sess: &Session, find_features: bool)
 
     let singlethread = sess.target.target.options.singlethread;
 
-    let triple = &sess.target.target.llvm_target;
-
-    let triple = CString::new(triple.as_bytes()).unwrap();
-    let cpu = sess.target_cpu();
-    let cpu = CString::new(cpu.as_bytes()).unwrap();
+    let triple = SmallCStr::new(&sess.target.target.llvm_target);
+    let cpu = SmallCStr::new(sess.target_cpu());
     let features = attributes::llvm_target_features(sess)
         .collect::<Vec<_>>()
         .join(",");
     let features = CString::new(features).unwrap();
     let is_pie_binary = !find_features && is_pie_binary(sess);
     let trap_unreachable = sess.target.target.options.trap_unreachable;
+
+    let asm_comments = sess.asm_comments();
 
     Arc::new(move || {
         let tm = unsafe {
@@ -195,6 +195,7 @@ pub fn target_machine_factory(sess: &Session, find_features: bool)
                 fdata_sections,
                 trap_unreachable,
                 singlethread,
+                asm_comments,
             )
         };
 
@@ -522,7 +523,7 @@ unsafe fn optimize(cgcx: &CodegenContext,
             // If we're verifying or linting, add them to the function pass
             // manager.
             let addpass = |pass_name: &str| {
-                let pass_name = CString::new(pass_name).unwrap();
+                let pass_name = SmallCStr::new(pass_name);
                 let pass = match llvm::LLVMRustFindAndCreatePass(pass_name.as_ptr()) {
                     Some(pass) => pass,
                     None => return false,

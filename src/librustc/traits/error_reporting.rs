@@ -435,13 +435,14 @@ impl<'a, 'gcx, 'tcx> InferCtxt<'a, 'gcx, 'tcx> {
     }
 
     fn report_similar_impl_candidates(&self,
-                                      impl_candidates: Vec<ty::TraitRef<'tcx>>,
+                                      mut impl_candidates: Vec<ty::TraitRef<'tcx>>,
                                       err: &mut DiagnosticBuilder)
     {
         if impl_candidates.is_empty() {
             return;
         }
 
+        let len = impl_candidates.len();
         let end = if impl_candidates.len() <= 5 {
             impl_candidates.len()
         } else {
@@ -459,10 +460,17 @@ impl<'a, 'gcx, 'tcx> InferCtxt<'a, 'gcx, 'tcx> {
             }
         });
 
+        // Sort impl candidates so that ordering is consistent for UI tests.
+        let normalized_impl_candidates = &mut impl_candidates[0..end]
+            .iter()
+            .map(normalize)
+            .collect::<Vec<String>>();
+        normalized_impl_candidates.sort();
+
         err.help(&format!("the following implementations were found:{}{}",
-                          &impl_candidates[0..end].iter().map(normalize).collect::<String>(),
-                          if impl_candidates.len() > 5 {
-                              format!("\nand {} others", impl_candidates.len() - 4)
+                          normalized_impl_candidates.join(""),
+                          if len > 5 {
+                              format!("\nand {} others", len - 4)
                           } else {
                               "".to_owned()
                           }
@@ -1464,11 +1472,16 @@ impl<'a, 'gcx, 'tcx> InferCtxt<'a, 'gcx, 'tcx> {
             ObligationCauseCode::StructInitializerSized => {
                 err.note("structs must have a statically known size to be initialized");
             }
-            ObligationCauseCode::FieldSized(ref item) => {
+            ObligationCauseCode::FieldSized { adt_kind: ref item, last } => {
                 match *item {
                     AdtKind::Struct => {
-                        err.note("only the last field of a struct may have a dynamically \
-                                  sized type");
+                        if last {
+                            err.note("the last field of a packed struct may only have a \
+                                      dynamically sized type if it does not need drop to be run");
+                        } else {
+                            err.note("only the last field of a struct may have a dynamically \
+                                      sized type");
+                        }
                     }
                     AdtKind::Union => {
                         err.note("no field of a union may have a dynamically sized type");

@@ -15,9 +15,9 @@ use ast;
 use codemap::Spanned;
 use edition::Edition;
 use parse::{token, ParseSess};
+use OneVector;
 
 use ptr::P;
-use util::small_vector::SmallVector;
 
 /// A folder that strips out items that do not belong in the current configuration.
 pub struct StripUnconfigured<'a> {
@@ -90,7 +90,7 @@ impl<'a> StripUnconfigured<'a> {
             let cfg = parser.parse_meta_item()?;
             parser.expect(&token::Comma)?;
             let lo = parser.span.lo();
-            let (path, tokens) = parser.parse_path_and_tokens()?;
+            let (path, tokens) = parser.parse_meta_item_unrestricted()?;
             parser.expect(&token::CloseDelim(token::Paren))?;
             Ok((cfg, path, tokens, parser.prev_span.with_lo(lo)))
         }) {
@@ -319,22 +319,22 @@ impl<'a> fold::Folder for StripUnconfigured<'a> {
         Some(P(fold::noop_fold_expr(expr, self)))
     }
 
-    fn fold_stmt(&mut self, stmt: ast::Stmt) -> SmallVector<ast::Stmt> {
+    fn fold_stmt(&mut self, stmt: ast::Stmt) -> OneVector<ast::Stmt> {
         match self.configure_stmt(stmt) {
             Some(stmt) => fold::noop_fold_stmt(stmt, self),
-            None => return SmallVector::new(),
+            None => return OneVector::new(),
         }
     }
 
-    fn fold_item(&mut self, item: P<ast::Item>) -> SmallVector<P<ast::Item>> {
+    fn fold_item(&mut self, item: P<ast::Item>) -> OneVector<P<ast::Item>> {
         fold::noop_fold_item(configure!(self, item), self)
     }
 
-    fn fold_impl_item(&mut self, item: ast::ImplItem) -> SmallVector<ast::ImplItem> {
+    fn fold_impl_item(&mut self, item: ast::ImplItem) -> OneVector<ast::ImplItem> {
         fold::noop_fold_impl_item(configure!(self, item), self)
     }
 
-    fn fold_trait_item(&mut self, item: ast::TraitItem) -> SmallVector<ast::TraitItem> {
+    fn fold_trait_item(&mut self, item: ast::TraitItem) -> OneVector<ast::TraitItem> {
         fold::noop_fold_trait_item(configure!(self, item), self)
     }
 

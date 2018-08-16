@@ -21,11 +21,13 @@
 
 #![feature(crate_visibility_modifier)]
 #![feature(macro_at_most_once_rep)]
+#![cfg_attr(not(stage0), feature(nll))]
 #![feature(rustc_attrs)]
 #![feature(rustc_diagnostic_macros)]
 #![feature(slice_sort_by_cached_key)]
 #![feature(str_escape)]
 #![feature(unicode_internals)]
+#![feature(catch_expr)]
 
 #![recursion_limit="256"]
 
@@ -43,6 +45,8 @@ extern crate serialize as rustc_serialize; // used by deriving
 
 use rustc_data_structures::sync::Lock;
 use rustc_data_structures::bitvec::BitVector;
+pub use rustc_data_structures::small_vec::OneVector;
+pub use rustc_data_structures::thin_vec::ThinVec;
 use ast::AttrId;
 
 // A variant of 'try!' that panics on an Err. This is used as a crutch on the
@@ -122,11 +126,7 @@ pub mod util {
     pub mod parser;
     #[cfg(test)]
     pub mod parser_testing;
-    pub mod small_vector;
     pub mod move_map;
-
-    mod thin_vec;
-    pub use self::thin_vec::ThinVec;
 
     mod rc_slice;
     pub use self::rc_slice::RcSlice;

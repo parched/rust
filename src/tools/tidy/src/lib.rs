@@ -68,12 +68,14 @@ fn filter_dirs(path: &Path) -> bool {
         "src/vendor",
         "src/rt/hoedown",
         "src/tools/cargo",
+        "src/tools/clang",
         "src/tools/rls",
         "src/tools/clippy",
         "src/tools/rust-installer",
         "src/tools/rustfmt",
         "src/tools/miri",
         "src/tools/lld",
+        "src/tools/lldb",
         "src/librustc/mir/interpret",
         "src/librustc_mir/interpret",
         "src/target",
@@ -89,16 +91,18 @@ fn walk_many(paths: &[&Path], skip: &mut dyn FnMut(&Path) -> bool, f: &mut dyn F
 }
 
 fn walk(path: &Path, skip: &mut dyn FnMut(&Path) -> bool, f: &mut dyn FnMut(&Path)) {
-    for entry in t!(fs::read_dir(path), path) {
-        let entry = t!(entry);
-        let kind = t!(entry.file_type());
-        let path = entry.path();
-        if kind.is_dir() {
-            if !skip(&path) {
-                walk(&path, skip, f);
+    if let Ok(dir) = fs::read_dir(path) {
+        for entry in dir {
+            let entry = t!(entry);
+            let kind = t!(entry.file_type());
+            let path = entry.path();
+            if kind.is_dir() {
+                if !skip(&path) {
+                    walk(&path, skip, f);
+                }
+            } else {
+                f(&path);
             }
-        } else {
-            f(&path);
         }
     }
 }

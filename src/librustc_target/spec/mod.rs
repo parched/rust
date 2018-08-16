@@ -319,6 +319,7 @@ supported_targets! {
     ("i686-unknown-openbsd", i686_unknown_openbsd),
     ("x86_64-unknown-openbsd", x86_64_unknown_openbsd),
 
+    ("aarch64-unknown-netbsd", aarch64_unknown_netbsd),
     ("armv6-unknown-netbsd-eabihf", armv6_unknown_netbsd_eabihf),
     ("armv7-unknown-netbsd-eabihf", armv7_unknown_netbsd_eabihf),
     ("i686-unknown-netbsd", i686_unknown_netbsd),
@@ -379,6 +380,8 @@ supported_targets! {
     ("x86_64-unknown-hermit", x86_64_unknown_hermit),
 
     ("riscv32imac-unknown-none-elf", riscv32imac_unknown_none_elf),
+
+    ("aarch64-unknown-none", aarch64_unknown_none),
 }
 
 /// Everything `rustc` knows about how to compile for a specific target.
@@ -764,14 +767,10 @@ impl Target {
         // the JSON parser is not updated to match the structs.
 
         let get_req_field = |name: &str| {
-            match obj.find(name)
-                     .map(|s| s.as_string())
-                     .and_then(|os| os.map(|s| s.to_string())) {
-                Some(val) => Ok(val),
-                None => {
-                    return Err(format!("Field {} in target specification is required", name))
-                }
-            }
+            obj.find(name)
+               .map(|s| s.as_string())
+               .and_then(|os| os.map(|s| s.to_string()))
+               .ok_or_else(|| format!("Field {} in target specification is required", name))
         };
 
         let get_opt_field = |name: &str, default: &str| {

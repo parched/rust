@@ -13,7 +13,6 @@ use common;
 use llvm;
 use rustc::dep_graph::DepGraphSafe;
 use rustc::hir;
-use rustc::hir::def_id::DefId;
 use debuginfo;
 use callee;
 use base;
@@ -26,6 +25,7 @@ use type_::Type;
 use type_of::PointeeInfo;
 
 use rustc_data_structures::base_n;
+use rustc_data_structures::small_c_str::SmallCStr;
 use rustc::mir::mono::Stats;
 use rustc::session::config::{self, DebugInfo};
 use rustc::session::Session;
@@ -34,7 +34,7 @@ use rustc::ty::{self, Ty, TyCtxt};
 use rustc::util::nodemap::FxHashMap;
 use rustc_target::spec::{HasTargetSpec, Target};
 
-use std::ffi::{CStr, CString};
+use std::ffi::CStr;
 use std::cell::{Cell, RefCell};
 use std::iter;
 use std::str;
@@ -76,9 +76,6 @@ pub struct CodegenCx<'a, 'tcx: 'a> {
 
     /// Cache of emitted const globals (value -> global)
     pub const_globals: RefCell<FxHashMap<&'a Value, &'a Value>>,
-
-    /// Mapping from static definitions to their DefId's.
-    pub statics: RefCell<FxHashMap<&'a Value, DefId>>,
 
     /// List of globals for static variables which need to be passed to the
     /// LLVM function ReplaceAllUsesWith (RAUW) when codegen is complete.
@@ -161,7 +158,7 @@ pub unsafe fn create_module(
     llcx: &'ll llvm::Context,
     mod_name: &str,
 ) -> &'ll llvm::Module {
-    let mod_name = CString::new(mod_name).unwrap();
+    let mod_name = SmallCStr::new(mod_name);
     let llmod = llvm::LLVMModuleCreateWithNameInContext(mod_name.as_ptr(), llcx);
 
     // Ensure the data-layout values hardcoded remain the defaults.
@@ -201,11 +198,10 @@ pub unsafe fn create_module(
         }
     }
 
-    let data_layout = CString::new(&sess.target.target.data_layout[..]).unwrap();
+    let data_layout = SmallCStr::new(&sess.target.target.data_layout);
     llvm::LLVMSetDataLayout(llmod, data_layout.as_ptr());
 
-    let llvm_target = sess.target.target.llvm_target.as_bytes();
-    let llvm_target = CString::new(llvm_target).unwrap();
+    let llvm_target = SmallCStr::new(&sess.target.target.llvm_target);
     llvm::LLVMRustSetNormalizedTarget(llmod, llvm_target.as_ptr());
 
     if is_pie_binary(sess) {
@@ -297,7 +293,6 @@ impl<'a, 'tcx> CodegenCx<'a, 'tcx> {
             const_cstr_cache: RefCell::new(FxHashMap()),
             const_unsized: RefCell::new(FxHashMap()),
             const_globals: RefCell::new(FxHashMap()),
-            statics: RefCell::new(FxHashMap()),
             statics_to_rauw: RefCell::new(Vec::new()),
             used_statics: RefCell::new(Vec::new()),
             lltypes: RefCell::new(FxHashMap()),

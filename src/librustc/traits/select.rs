@@ -226,6 +226,7 @@ pub struct SelectionCache<'tcx> {
 /// parameter environment.
 #[derive(PartialEq,Eq,Debug,Clone)]
 enum SelectionCandidate<'tcx> {
+    /// If has_nested is false, there are no *further* obligations
     BuiltinCandidate { has_nested: bool },
     ParamCandidate(ty::PolyTraitRef<'tcx>),
     ImplCandidate(DefId),
@@ -563,7 +564,7 @@ impl<'cx, 'gcx, 'tcx> SelectionContext<'cx, 'gcx, 'tcx> {
     pub fn select(&mut self, obligation: &TraitObligation<'tcx>)
                   -> SelectionResult<'tcx, Selection<'tcx>> {
         debug!("select({:?})", obligation);
-        assert!(!obligation.predicate.has_escaping_regions());
+        debug_assert!(!obligation.predicate.has_escaping_regions());
 
         let stack = self.push_stack(TraitObligationStackList::empty(), obligation);
 
@@ -662,7 +663,7 @@ impl<'cx, 'gcx, 'tcx> SelectionContext<'cx, 'gcx, 'tcx> {
 
         match obligation.predicate {
             ty::Predicate::Trait(ref t) => {
-                assert!(!t.has_escaping_regions());
+                debug_assert!(!t.has_escaping_regions());
                 let obligation = obligation.with(t.clone());
                 self.evaluate_trait_predicate_recursively(previous_stack, obligation)
             }
@@ -1076,7 +1077,7 @@ impl<'cx, 'gcx, 'tcx> SelectionContext<'cx, 'gcx, 'tcx> {
         debug!("candidate_from_obligation(cache_fresh_trait_pred={:?}, obligation={:?})",
                cache_fresh_trait_pred,
                stack);
-        assert!(!stack.obligation.predicate.has_escaping_regions());
+        debug_assert!(!stack.obligation.predicate.has_escaping_regions());
 
         if let Some(c) = self.check_candidate_cache(stack.obligation.param_env,
                                                     &cache_fresh_trait_pred) {
@@ -1586,7 +1587,7 @@ impl<'cx, 'gcx, 'tcx> SelectionContext<'cx, 'gcx, 'tcx> {
                         snapshot: &infer::CombinedSnapshot<'cx, 'tcx>)
                         -> bool
     {
-        assert!(!skol_trait_ref.has_escaping_regions());
+        debug_assert!(!skol_trait_ref.has_escaping_regions());
         if self.infcx.at(&obligation.cause, obligation.param_env)
                      .sup(ty::Binder::dummy(skol_trait_ref), trait_bound).is_err() {
             return false;
@@ -2039,12 +2040,20 @@ impl<'cx, 'gcx, 'tcx> SelectionContext<'cx, 'gcx, 'tcx> {
         }
 
         match other.candidate {
+            // Prefer BuiltinCandidate { has_nested: false } to anything else.
+            // This is a fix for #53123 and prevents winnowing from accidentally extending the
+            // lifetime of a variable.
+            BuiltinCandidate { has_nested: false } => true,
             ParamCandidate(ref cand) => match victim.candidate {
                 AutoImplCandidate(..) => {
                     bug!(
                         "default implementations shouldn't be recorded \
                          when there are other valid candidates");
                 }
+                // Prefer BuiltinCandidate { has_nested: false } to anything else.
+                // This is a fix for #53123 and prevents winnowing from accidentally extending the
+                // lifetime of a variable.
+                BuiltinCandidate { has_nested: false } => false,
                 ImplCandidate(..) |
                 ClosureCandidate |
                 GeneratorCandidate |
@@ -2072,6 +2081,10 @@ impl<'cx, 'gcx, 'tcx> SelectionContext<'cx, 'gcx, 'tcx> {
                         "default implementations shouldn't be recorded \
                          when there are other valid candidates");
                 }
+                // Prefer BuiltinCandidate { has_nested: false } to anything else.
+                // This is a fix for #53123 and prevents winnowing from accidentally extending the
+                // lifetime of a variable.
+                BuiltinCandidate { has_nested: false } => false,
                 ImplCandidate(..) |
                 ClosureCandidate |
                 GeneratorCandidate |
@@ -2115,7 +2128,7 @@ impl<'cx, 'gcx, 'tcx> SelectionContext<'cx, 'gcx, 'tcx> {
             FnPointerCandidate |
             BuiltinObjectCandidate |
             BuiltinUnsizeCandidate |
-            BuiltinCandidate { .. } => {
+            BuiltinCandidate { has_nested: true } => {
                 match victim.candidate {
                     ParamCandidate(ref cand) => {
                         // Prefer these to a global where-clause bound

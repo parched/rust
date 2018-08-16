@@ -230,7 +230,6 @@ pub fn get_static(cx: &CodegenCx<'ll, '_>, def_id: DefId) -> &'ll Value {
     }
 
     cx.instances.borrow_mut().insert(instance, g);
-    cx.statics.borrow_mut().insert(g, def_id);
     g
 }
 
@@ -328,7 +327,7 @@ pub fn codegen_static<'a, 'tcx>(
         } else {
             // If we created the global with the wrong type,
             // correct the type.
-            let empty_string = CString::new("").unwrap();
+            let empty_string = const_cstr!("");
             let name_str_ref = CStr::from_ptr(llvm::LLVMGetValueName(g));
             let name_string = CString::new(name_str_ref.to_bytes()).unwrap();
             llvm::LLVMSetValueName(g, empty_string.as_ptr());

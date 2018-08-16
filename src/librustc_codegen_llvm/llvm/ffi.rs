@@ -1455,7 +1455,8 @@ extern "C" {
                                        FunctionSections: bool,
                                        DataSections: bool,
                                        TrapUnreachable: bool,
-                                       Singlethread: bool)
+                                       Singlethread: bool,
+                                       AsmComments: bool)
                                        -> Option<&'static mut TargetMachine>;
     pub fn LLVMRustDisposeTargetMachine(T: &'static mut TargetMachine);
     pub fn LLVMRustAddAnalysisPasses(T: &'a TargetMachine, PM: &PassManager<'a>, M: &'a Module);
@@ -1564,7 +1565,7 @@ extern "C" {
                                 -> LLVMRustResult;
     pub fn LLVMRustArchiveMemberNew(Filename: *const c_char,
                                     Name: *const c_char,
-                                    Child: Option<&'a ArchiveChild>)
+                                    Child: Option<&ArchiveChild<'a>>)
                                     -> &'a mut RustArchiveMember<'a>;
     pub fn LLVMRustArchiveMemberFree(Member: &'a mut RustArchiveMember<'a>);
 

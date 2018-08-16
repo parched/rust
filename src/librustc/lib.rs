@@ -51,6 +51,7 @@
 #![feature(never_type)]
 #![feature(exhaustive_patterns)]
 #![feature(extern_types)]
+#![cfg_attr(not(stage0), feature(nll))]
 #![feature(non_exhaustive)]
 #![feature(proc_macro_internals)]
 #![feature(quote)]
@@ -134,7 +135,6 @@ pub mod middle {
     pub mod borrowck;
     pub mod expr_use_visitor;
     pub mod cstore;
-    pub mod dataflow;
     pub mod dead;
     pub mod dependency_format;
     pub mod entry;
