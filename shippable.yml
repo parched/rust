@@ -2,9 +2,9 @@ runtime:
   nodePool: shippable_shared_aarch64
 
 build:
-  pre_ci_boot:
-    image_name: drydockaarch64/u16cppall
-    image_tag: v6.7.4
+  #pre_ci_boot:
+  #  image_name: drydockaarch64/u16cppall
+  #  image_tag: v6.7.4
   ci:
     - sudo apt-get install cmake
     - git submodule update --init --recursive
