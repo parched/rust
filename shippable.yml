@@ -10,4 +10,4 @@ build:
   ci:
     - sudo apt-get update -y && sudo apt-get install cmake
     - git submodule update --init --recursive
-    - ./x.py build --verbose
+    - ./x.py build -vv
