@@ -10,4 +10,7 @@ build:
   ci:
     - sudo apt-get update -y && sudo apt-get install cmake
     - git submodule update --init --recursive
-    - ./x.py build -vv
+    - echo "$PWD/core.dump" > /proc/sys/kernel/core_pattern
+    - echo "bt" > bt
+    - ulimit -c unlimited && ./x.py build -vv
+    - gdb -batch -c core.dump -x bt
