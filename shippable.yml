@@ -10,7 +10,7 @@ build:
   ci:
     - sudo apt-get update -y && sudo apt-get install cmake
     - git submodule update --init --recursive
-    - echo "$PWD/core.dump" > /proc/sys/kernel/core_pattern
+    - cat /proc/sys/kernel/core_pattern
+    - echo -e "[main]\nunpackaged=true" > ~/.config/apport/settings
     - echo "bt" > bt
-    - ulimit -c unlimited && ./x.py build -vv
-    - gdb -batch -c core.dump -x bt
+    - ulimit -c unlimited && ./x.py build -vv; ls /var/crash/; apport-unpack /var/crash/* dump; gdb -batch -c dump/CoreDump -x bt
