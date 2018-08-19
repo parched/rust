@@ -11,6 +11,7 @@ build:
     - sudo apt-get update -y && sudo apt-get install cmake
     - git submodule update --init --recursive
     - cat /proc/sys/kernel/core_pattern
+    - cat /proc/sys/kernel/core_uses_pid
     - echo "bt" > bt
     - ulimit -c unlimited && ./x.py build -vv
-    - for core in `find . -name core`; do gdb -batch -c "$core" -x bt; done
+    - for core in `find . -regextype posix-egrep -regex '.*/core(\b|\.[0-9]+)'`; do gdb -batch -c "$core" -x bt; done
