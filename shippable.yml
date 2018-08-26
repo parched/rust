@@ -4,13 +4,16 @@ runtime:
   nodePool: shippable_shared_aarch64
 
 build:
+  cache: true
+  cache_dir_list:
+    - $HOME/.ccache
   #pre_ci_boot:
   #  image_name: drydockaarch64/u16cppall
   #  image_tag: v6.7.4
   ci:
-    - sudo apt-get update -y && sudo apt-get install cmake
+    - sudo apt-get update -y && sudo apt-get install cmake ccache
     - git submodule update --init --recursive
     - cat /proc/sys/kernel/core_pattern
     - cat /proc/sys/kernel/core_uses_pid
     - echo "bt" > bt
-    - ulimit -c unlimited && ./x.py build -vv; for core in `find . -regextype posix-egrep -regex '.*/core(\b|\.[0-9]+)'`; do gdb -batch -c "$core" -x bt; done
+    - ulimit -c unlimited && ./x.py build -vv --ccache=true; for core in `find . -type f -regextype posix-egrep -regex '.*/core(\b|\.[0-9]+)'`; do gdb -batch -c "$core" -x bt; done
