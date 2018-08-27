@@ -16,4 +16,4 @@ build:
     - cat /proc/sys/kernel/core_pattern
     - cat /proc/sys/kernel/core_uses_pid
     - echo "bt" > bt
-    - ulimit -c unlimited && ./x.py build -vv --ccache=true; for core in `find . -type f -regextype posix-egrep -regex '.*/core(\b|\.[0-9]+)'`; do gdb -batch -c "$core" -x bt; done
+    - ulimit -c unlimited && ./x.py build -vv --enable-ccache; for core in `find . -type f -regextype posix-egrep -regex '.*/core(\b|\.[0-9]+)'`; do gdb -batch -c "$core" -x bt; done
