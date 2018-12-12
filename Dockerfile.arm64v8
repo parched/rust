@@ -1,0 +1,14 @@
+ FROM arm64v8/ubuntu:latest
+ RUN apt-get update && apt-get install -y --no-install-recommends \
+     ca-certificates \
+     ccache \
+     cmake \
+     curl \
+     file \
+     git \
+     gdb \
+     g++ \
+     make \
+     python2.7 \
+     sudo \
+     xz-utils
