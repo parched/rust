@@ -295,9 +295,8 @@ that has been imported into the current module.
 Erroneous code example:
 
 ```compile_fail,E0259
-# #![feature(libc)]
 extern crate core;
-extern crate libc as core;
+extern crate std as core;
 
 fn main() {}
 ```
@@ -308,9 +307,8 @@ external crate imported into the current module.
 Correct example:
 
 ```
-# #![feature(libc)]
 extern crate core;
-extern crate libc as other_name;
+extern crate std as other_name;
 
 fn main() {}
 ```
@@ -770,17 +768,18 @@ match x {
 "##,
 
 E0411: r##"
-The `Self` keyword was used outside an impl or a trait.
+The `Self` keyword was used outside an impl, trait, or type definition.
 
 Erroneous code example:
 
 ```compile_fail,E0411
-<Self>::foo; // error: use of `Self` outside of an impl or trait
+<Self>::foo; // error: use of `Self` outside of an impl, trait, or type
+             // definition
 ```
 
 The `Self` keyword represents the current type, which explains why it can only
-be used inside an impl or a trait. It gives access to the associated items of a
-type:
+be used inside an impl, trait, or type definition. It gives access to the
+associated items of a type:
 
 ```
 trait Foo {
@@ -1252,7 +1251,7 @@ Erroneous code example:
 
 ```compile_fail,E0433
 let map = HashMap::new();
-// error: failed to resolve. Use of undeclared type or module `HashMap`
+// error: failed to resolve: use of undeclared type or module `HashMap`
 ```
 
 Please verify you didn't misspell the type/module's name or that you didn't

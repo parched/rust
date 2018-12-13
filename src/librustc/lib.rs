@@ -30,7 +30,7 @@
 //!
 //! For more information about how rustc works, see the [rustc guide].
 //!
-//! [rustc guide]: https://rust-lang-nursery.github.io/rustc-guide/
+//! [rustc guide]: https://rust-lang.github.io/rustc-guide/
 //!
 //! # Note
 //!
@@ -42,21 +42,20 @@
 
 #![feature(box_patterns)]
 #![feature(box_syntax)]
-#![feature(const_fn)]
 #![feature(core_intrinsics)]
 #![feature(drain_filter)]
-#![feature(iterator_find_map)]
 #![cfg_attr(windows, feature(libc))]
-#![feature(macro_vis_matcher)]
 #![feature(never_type)]
 #![feature(exhaustive_patterns)]
 #![feature(extern_types)]
+#![feature(nll)]
 #![feature(non_exhaustive)]
 #![feature(proc_macro_internals)]
 #![feature(quote)]
 #![feature(optin_builtin_traits)]
 #![feature(refcell_replace_swap)]
 #![feature(rustc_diagnostic_macros)]
+#![feature(rustc_attrs)]
 #![feature(slice_patterns)]
 #![feature(slice_sort_by_cached_key)]
 #![feature(specialization)]
@@ -64,17 +63,16 @@
 #![feature(trace_macros)]
 #![feature(trusted_len)]
 #![feature(vec_remove_item)]
-#![feature(catch_expr)]
 #![feature(step_trait)]
 #![feature(integer_atomics)]
 #![feature(test)]
-#![cfg_attr(not(stage0), feature(impl_header_lifetime_elision))]
 #![feature(in_band_lifetimes)]
-#![feature(macro_at_most_once_rep)]
-#![feature(crate_in_paths)]
 #![feature(crate_visibility_modifier)]
+#![feature(transpose_result)]
 
 #![recursion_limit="512"]
+
+#![warn(elided_lifetimes_in_paths)]
 
 extern crate arena;
 #[macro_use] extern crate bitflags;
@@ -108,6 +106,9 @@ extern crate rustc_apfloat;
 extern crate byteorder;
 extern crate backtrace;
 
+#[macro_use]
+extern crate smallvec;
+
 // Note that librustc doesn't actually depend on these crates, see the note in
 // `Cargo.toml` for this crate about why these are here.
 #[allow(unused_extern_crates)]
@@ -118,7 +119,7 @@ extern crate test;
 #[macro_use]
 mod macros;
 
-// NB: This module needs to be declared first so diagnostics are
+// N.B., this module needs to be declared first so diagnostics are
 // registered before they are used.
 pub mod diagnostics;
 
@@ -134,7 +135,6 @@ pub mod middle {
     pub mod borrowck;
     pub mod expr_use_visitor;
     pub mod cstore;
-    pub mod dataflow;
     pub mod dead;
     pub mod dependency_format;
     pub mod entry;

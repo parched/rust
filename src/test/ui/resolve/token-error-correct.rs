@@ -8,11 +8,10 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-// Test that we do some basic error correcton in the tokeniser.
+// Test that we do some basic error correction in the tokeniser.
 
 fn main() {
     foo(bar(;
     //~^ ERROR: expected expression, found `;`
 }
 //~^ ERROR: incorrect close delimiter: `}`
-//~| ERROR: incorrect close delimiter: `}`

@@ -256,7 +256,7 @@ fn initial_buffer_size(file: &File) -> usize {
 /// use std::fs;
 /// use std::net::SocketAddr;
 ///
-/// fn main() -> Result<(), Box<std::error::Error + 'static>> {
+/// fn main() -> Result<(), Box<dyn std::error::Error + 'static>> {
 ///     let foo: SocketAddr = String::from_utf8_lossy(&fs::read("address.txt")?).parse()?;
 ///     Ok(())
 /// }
@@ -298,7 +298,7 @@ pub fn read<P: AsRef<Path>>(path: P) -> io::Result<Vec<u8>> {
 /// use std::fs;
 /// use std::net::SocketAddr;
 ///
-/// fn main() -> Result<(), Box<std::error::Error + 'static>> {
+/// fn main() -> Result<(), Box<dyn std::error::Error + 'static>> {
 ///     let foo: SocketAddr = fs::read_to_string("address.txt")?.parse()?;
 ///     Ok(())
 /// }
@@ -726,7 +726,7 @@ impl OpenOptions {
     /// If a file is opened with both read and append access, beware that after
     /// opening, and after every write, the position for reading may be set at the
     /// end of the file. So, before writing, save the current position (using
-    /// [`seek`]`(`[`SeekFrom`]`::`[`Current`]`(0))`, and restore it before the next read.
+    /// [`seek`]`(`[`SeekFrom`]`::`[`Current`]`(0))`), and restore it before the next read.
     ///
     /// ## Note
     ///
@@ -877,7 +877,7 @@ impl OpenOptions {
 
     fn _open(&self, path: &Path) -> io::Result<File> {
         let inner = fs_imp::File::open(path, &self.0)?;
-        Ok(File { inner: inner })
+        Ok(File { inner })
     }
 }
 
@@ -1406,7 +1406,7 @@ impl AsInner<fs_imp::DirEntry> for DirEntry {
 /// Removes a file from the filesystem.
 ///
 /// Note that there is no
-/// guarantee that the file is immediately deleted (e.g. depending on
+/// guarantee that the file is immediately deleted (e.g., depending on
 /// platform, other open file descriptors may prevent immediate removal).
 ///
 /// # Platform-specific behavior
@@ -1565,6 +1565,12 @@ pub fn rename<P: AsRef<Path>, Q: AsRef<Path>>(from: P, to: Q) -> io::Result<()> 
 ///
 /// On success, the total number of bytes copied is returned and it is equal to
 /// the length of the `to` file as reported by `metadata`.
+///
+/// If you’re wanting to copy the contents of one file to another and you’re
+/// working with [`File`]s, see the [`io::copy`] function.
+///
+/// [`io::copy`]: ../io/fn.copy.html
+/// [`File`]: ./struct.File.html
 ///
 /// # Platform-specific behavior
 ///
@@ -1749,12 +1755,19 @@ pub fn canonicalize<P: AsRef<Path>>(path: P) -> io::Result<PathBuf> {
 ///
 /// [changes]: ../io/index.html#platform-specific-behavior
 ///
+/// **NOTE**: If a parent of the given path doesn't exist, this function will
+/// return an error. To create a directory and all its missing parents at the
+/// same time, use the [`create_dir_all`] function.
+///
 /// # Errors
 ///
 /// This function will return an error in the following situations, but is not
 /// limited to just these cases:
 ///
 /// * User lacks permissions to create directory at `path`.
+/// * A parent of the given path doesn't exist. (To create a directory and all
+///   its missing parents at the same time, use the [`create_dir_all`]
+///   function.)
 /// * `path` already exists.
 ///
 /// # Examples
@@ -2052,7 +2065,7 @@ impl DirBuilder {
             Err(e) => return Err(e),
         }
         match path.parent() {
-            Some(p) => try!(self.create_dir_all(p)),
+            Some(p) => self.create_dir_all(p)?,
             None => return Err(io::Error::new(io::ErrorKind::Other, "failed to create whole tree")),
         }
         match self.inner.mkdir(path) {
@@ -2076,7 +2089,7 @@ mod tests {
     use fs::{self, File, OpenOptions};
     use io::{ErrorKind, SeekFrom};
     use path::Path;
-    use rand::{StdRng, Rng};
+    use rand::{rngs::StdRng, FromEntropy, RngCore};
     use str;
     use sys_common::io::test::{TempDir, tmpdir};
     use thread;
@@ -3110,7 +3123,7 @@ mod tests {
     #[test]
     fn binary_file() {
         let mut bytes = [0; 1024];
-        StdRng::new().unwrap().fill_bytes(&mut bytes);
+        StdRng::from_entropy().fill_bytes(&mut bytes);
 
         let tmpdir = tmpdir();
 
@@ -3123,7 +3136,7 @@ mod tests {
     #[test]
     fn write_then_read() {
         let mut bytes = [0; 1024];
-        StdRng::new().unwrap().fill_bytes(&mut bytes);
+        StdRng::from_entropy().fill_bytes(&mut bytes);
 
         let tmpdir = tmpdir();
 

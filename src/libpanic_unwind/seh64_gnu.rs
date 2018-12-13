@@ -11,7 +11,7 @@
 //! Unwinding implementation of top of native Win64 SEH,
 //! however the unwind handler data (aka LSDA) uses GCC-compatible encoding.
 
-#![allow(bad_style)]
+#![allow(nonstandard_style)]
 #![allow(private_no_mangle_fns)]
 
 use alloc::boxed::Box;
@@ -41,7 +41,7 @@ struct PanicData {
 }
 
 pub unsafe fn panic(data: Box<dyn Any + Send>) -> u32 {
-    let panic_ctx = Box::new(PanicData { data: data });
+    let panic_ctx = Box::new(PanicData { data });
     let params = [Box::into_raw(panic_ctx) as c::ULONG_PTR];
     c::RaiseException(RUST_PANIC,
                       c::EXCEPTION_NONCONTINUABLE,

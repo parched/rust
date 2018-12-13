@@ -724,7 +724,7 @@ pub trait ExactSizeIterator: Iterator {
 }
 
 #[stable(feature = "rust1", since = "1.0.0")]
-impl<'a, I: ExactSizeIterator + ?Sized> ExactSizeIterator for &'a mut I {
+impl<I: ExactSizeIterator + ?Sized> ExactSizeIterator for &mut I {
     fn len(&self) -> usize {
         (**self).len()
     }
@@ -770,7 +770,7 @@ pub trait Product<A = Self>: Sized {
     fn product<I: Iterator<Item=A>>(iter: I) -> Self;
 }
 
-// NB: explicitly use Add and Mul here to inherit overflow checks
+// N.B., explicitly use Add and Mul here to inherit overflow checks
 macro_rules! integer_sum_product {
     (@impls $zero:expr, $one:expr, #[$attr:meta], $($a:ty)*) => ($(
         #[$attr]
@@ -960,7 +960,7 @@ impl<T, U, E> Product<Result<U, E>> for Result<T, E>
 ///
 /// Calling next on a fused iterator that has returned `None` once is guaranteed
 /// to return [`None`] again. This trait should be implemented by all iterators
-/// that behave this way because it allows for some significant optimizations.
+/// that behave this way because it allows optimizing [`Iterator::fuse`].
 ///
 /// Note: In general, you should not use `FusedIterator` in generic bounds if
 /// you need a fused iterator. Instead, you should just call [`Iterator::fuse`]
@@ -974,7 +974,7 @@ impl<T, U, E> Product<Result<U, E>> for Result<T, E>
 pub trait FusedIterator: Iterator {}
 
 #[stable(feature = "fused", since = "1.26.0")]
-impl<'a, I: FusedIterator + ?Sized> FusedIterator for &'a mut I {}
+impl<I: FusedIterator + ?Sized> FusedIterator for &mut I {}
 
 /// An iterator that reports an accurate length using size_hint.
 ///
@@ -999,4 +999,4 @@ impl<'a, I: FusedIterator + ?Sized> FusedIterator for &'a mut I {}
 pub unsafe trait TrustedLen : Iterator {}
 
 #[unstable(feature = "trusted_len", issue = "37572")]
-unsafe impl<'a, I: TrustedLen + ?Sized> TrustedLen for &'a mut I {}
+unsafe impl<I: TrustedLen + ?Sized> TrustedLen for &mut I {}

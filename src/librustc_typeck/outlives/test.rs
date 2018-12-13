@@ -13,9 +13,9 @@ use rustc::hir::itemlikevisit::ItemLikeVisitor;
 use rustc::ty::TyCtxt;
 
 pub fn test_inferred_outlives<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>) {
-    tcx.hir
-        .krate()
-        .visit_all_item_likes(&mut OutlivesTest { tcx });
+    tcx.hir()
+       .krate()
+       .visit_all_item_likes(&mut OutlivesTest { tcx });
 }
 
 struct OutlivesTest<'a, 'tcx: 'a> {
@@ -24,7 +24,7 @@ struct OutlivesTest<'a, 'tcx: 'a> {
 
 impl<'a, 'tcx> ItemLikeVisitor<'tcx> for OutlivesTest<'a, 'tcx> {
     fn visit_item(&mut self, item: &'tcx hir::Item) {
-        let item_def_id = self.tcx.hir.local_def_id(item.id);
+        let item_def_id = self.tcx.hir().local_def_id(item.id);
 
         // For unit testing: check for a special "rustc_outlives"
         // attribute and report an error with various results if found.

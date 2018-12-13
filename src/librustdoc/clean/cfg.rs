@@ -31,13 +31,13 @@ pub enum Cfg {
     True,
     /// Denies all configurations.
     False,
-    /// A generic configration option, e.g. `test` or `target_os = "linux"`.
+    /// A generic configuration option, e.g., `test` or `target_os = "linux"`.
     Cfg(Symbol, Option<Symbol>),
-    /// Negate a configuration requirement, i.e. `not(x)`.
+    /// Negate a configuration requirement, i.e., `not(x)`.
     Not(Box<Cfg>),
-    /// Union of a list of configuration requirements, i.e. `any(...)`.
+    /// Union of a list of configuration requirements, i.e., `any(...)`.
     Any(Vec<Cfg>),
-    /// Intersection of a list of configuration requirements, i.e. `all(...)`.
+    /// Intersection of a list of configuration requirements, i.e., `all(...)`.
     All(Vec<Cfg>),
 }
 
@@ -61,7 +61,7 @@ impl Cfg {
 
     /// Parses a `MetaItem` into a `Cfg`.
     ///
-    /// The `MetaItem` should be the content of the `#[cfg(...)]`, e.g. `unix` or
+    /// The `MetaItem` should be the content of the `#[cfg(...)]`, e.g., `unix` or
     /// `target_os = "redox"`.
     ///
     /// If the content is not properly formatted, it will return an error indicating what and where
@@ -417,7 +417,7 @@ mod test {
 
     use syntax::symbol::Symbol;
     use syntax::ast::*;
-    use syntax::codemap::dummy_spanned;
+    use syntax::source_map::dummy_spanned;
     use syntax_pos::DUMMY_SP;
     use syntax::with_globals;
 

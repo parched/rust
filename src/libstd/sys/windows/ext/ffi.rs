@@ -31,7 +31,7 @@
 //!
 //! If Rust code *does* need to look into those strings, it can
 //! convert them to valid UTF-8, possibly lossily, by substituting
-//! invalid sequences with U+FFFD REPLACEMENT CHARACTER, as is
+//! invalid sequences with [`U+FFFD REPLACEMENT CHARACTER`][U+FFFD], as is
 //! conventionally done in other Rust APIs that deal with string
 //! encodings.
 //!
@@ -65,6 +65,7 @@
 //! [`from_wide`]: trait.OsStringExt.html#tymethod.from_wide
 //! [`encode_wide`]: trait.OsStrExt.html#tymethod.encode_wide
 //! [`collect`]: ../../../iter/trait.Iterator.html#method.collect
+//! [U+FFFD]: ../../../char/constant.REPLACEMENT_CHARACTER.html
 
 #![stable(feature = "rust1", since = "1.0.0")]
 
@@ -116,7 +117,7 @@ impl OsStringExt for OsString {
 /// [`OsStr`]: ../../../../std/ffi/struct.OsStr.html
 #[stable(feature = "rust1", since = "1.0.0")]
 pub trait OsStrExt {
-    /// Re-encodes an `OsStr` as a wide character sequence, i.e. potentially
+    /// Re-encodes an `OsStr` as a wide character sequence, i.e., potentially
     /// ill-formed UTF-16.
     ///
     /// This is lossless: calling [`OsString::from_wide`] and then

@@ -48,6 +48,9 @@ cfg_if! {
     } else if #[cfg(target_arch = "wasm32")] {
         mod wasm;
         pub use self::wasm::*;
+    } else if #[cfg(target_env = "sgx")] {
+        mod sgx;
+        pub use self::sgx::*;
     } else {
         compile_error!("libstd doesn't compile for this platform yet");
     }
@@ -57,7 +60,7 @@ cfg_if! {
 // then later used in the `std::os` module when documenting, for example,
 // Windows when we're compiling for Linux.
 
-#[cfg(dox)]
+#[cfg(rustdoc)]
 cfg_if! {
     if #[cfg(any(unix, target_os = "redox"))] {
         // On unix we'll document what's already available
@@ -77,7 +80,7 @@ cfg_if! {
     }
 }
 
-#[cfg(dox)]
+#[cfg(rustdoc)]
 cfg_if! {
     if #[cfg(windows)] {
         // On windows we'll just be documenting what's already available

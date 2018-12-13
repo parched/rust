@@ -8,6 +8,7 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+#![allow(dead_code)]
 // Static recursion check shouldn't fail when given a foreign item (#18279)
 
 // aux-build:check_static_recursion_foreign_helper.rs
@@ -15,7 +16,7 @@
 
 // pretty-expanded FIXME #23616
 
-#![feature(custom_attribute, libc)]
+#![feature(custom_attribute, rustc_private)]
 
 extern crate check_static_recursion_foreign_helper;
 extern crate libc;

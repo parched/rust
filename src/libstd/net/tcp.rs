@@ -43,12 +43,12 @@ use time::Duration;
 /// use std::io::prelude::*;
 /// use std::net::TcpStream;
 ///
-/// {
-///     let mut stream = TcpStream::connect("127.0.0.1:34254").unwrap();
+/// fn main() -> std::io::Result<()> {
+///     let mut stream = TcpStream::connect("127.0.0.1:34254")?;
 ///
-///     // ignore the Result
-///     let _ = stream.write(&[1]);
-///     let _ = stream.read(&mut [0; 128]); // ignore here too
+///     stream.write(&[1])?;
+///     stream.read(&mut [0; 128])?;
+///     Ok(())
 /// } // the stream is closed here
 /// ```
 #[stable(feature = "rust1", since = "1.0.0")]
@@ -530,7 +530,7 @@ impl TcpStream {
     /// Moves this TCP stream into or out of nonblocking mode.
     ///
     /// This will result in `read`, `write`, `recv` and `send` operations
-    /// becoming nonblocking, i.e. immediately returning from their calls.
+    /// becoming nonblocking, i.e., immediately returning from their calls.
     /// If the IO operation is successful, `Ok` is returned and no further
     /// action is required. If the IO operation could not be completed and needs
     /// to be retried, an error with kind [`io::ErrorKind::WouldBlock`] is
@@ -840,7 +840,7 @@ impl TcpListener {
     /// Moves this TCP stream into or out of nonblocking mode.
     ///
     /// This will result in the `accept` operation becoming nonblocking,
-    /// i.e. immediately returning from their calls. If the IO operation is
+    /// i.e., immediately returning from their calls. If the IO operation is
     /// successful, `Ok` is returned and no further action is required. If the
     /// IO operation could not be completed and needs to be retried, an error
     /// with kind [`io::ErrorKind::WouldBlock`] is returned.
@@ -1548,8 +1548,9 @@ mod tests {
 
         let mut buf = [0; 10];
         let start = Instant::now();
-        let kind = stream.read(&mut buf).err().expect("expected error").kind();
-        assert!(kind == ErrorKind::WouldBlock || kind == ErrorKind::TimedOut);
+        let kind = stream.read_exact(&mut buf).err().expect("expected error").kind();
+        assert!(kind == ErrorKind::WouldBlock || kind == ErrorKind::TimedOut,
+                "unexpected_error: {:?}", kind);
         assert!(start.elapsed() > Duration::from_millis(400));
         drop(listener);
     }
@@ -1570,8 +1571,9 @@ mod tests {
         assert_eq!(b"hello world", &buf[..]);
 
         let start = Instant::now();
-        let kind = stream.read(&mut buf).err().expect("expected error").kind();
-        assert!(kind == ErrorKind::WouldBlock || kind == ErrorKind::TimedOut);
+        let kind = stream.read_exact(&mut buf).err().expect("expected error").kind();
+        assert!(kind == ErrorKind::WouldBlock || kind == ErrorKind::TimedOut,
+                "unexpected_error: {:?}", kind);
         assert!(start.elapsed() > Duration::from_millis(400));
         drop(listener);
     }

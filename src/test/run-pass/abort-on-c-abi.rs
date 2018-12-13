@@ -8,20 +8,18 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+#![allow(unused_must_use)]
 // Since we mark some ABIs as "nounwind" to LLVM, we must make sure that
 // we never unwind through them.
 
 // ignore-cloudabi no env and process
 // ignore-emscripten no processes
 
-#![feature(unwind_attributes)]
-
 use std::{env, panic};
 use std::io::prelude::*;
 use std::io;
 use std::process::{Command, Stdio};
 
-#[unwind(aborts)]
 extern "C" fn panic_in_ffi() {
     panic!("Test");
 }

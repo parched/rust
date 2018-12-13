@@ -8,16 +8,10 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-// FIXME: Rename 'DIGlobalVariable' to 'DIGlobalVariableExpression'
-// once support for LLVM 3.9 is dropped.
-//
-// This method was changed in this LLVM patch:
-// https://reviews.llvm.org/D26769
-
 use super::debuginfo::{
     DIBuilder, DIDescriptor, DIFile, DILexicalBlock, DISubprogram, DIType,
     DIBasicType, DIDerivedType, DICompositeType, DIScope, DIVariable,
-    DIGlobalVariable, DIArray, DISubrange, DITemplateTypeParameter, DIEnumerator,
+    DIGlobalVariableExpression, DIArray, DISubrange, DITemplateTypeParameter, DIEnumerator,
     DINameSpace, DIFlags,
 };
 
@@ -25,6 +19,8 @@ use libc::{c_uint, c_int, size_t, c_char};
 use libc::{c_ulonglong, c_void};
 
 use std::marker::PhantomData;
+use syntax;
+use rustc_codegen_ssa;
 
 use super::RustString;
 
@@ -128,6 +124,7 @@ pub enum Attribute {
     SanitizeThread  = 20,
     SanitizeAddress = 21,
     SanitizeMemory  = 22,
+    NonLazyBind     = 23,
 }
 
 /// LLVMIntPredicate
@@ -144,6 +141,23 @@ pub enum IntPredicate {
     IntSGE = 39,
     IntSLT = 40,
     IntSLE = 41,
+}
+
+impl IntPredicate {
+    pub fn from_generic(intpre: rustc_codegen_ssa::common::IntPredicate) -> Self {
+        match intpre {
+            rustc_codegen_ssa::common::IntPredicate::IntEQ => IntPredicate::IntEQ,
+            rustc_codegen_ssa::common::IntPredicate::IntNE => IntPredicate::IntNE,
+            rustc_codegen_ssa::common::IntPredicate::IntUGT => IntPredicate::IntUGT,
+            rustc_codegen_ssa::common::IntPredicate::IntUGE => IntPredicate::IntUGE,
+            rustc_codegen_ssa::common::IntPredicate::IntULT => IntPredicate::IntULT,
+            rustc_codegen_ssa::common::IntPredicate::IntULE => IntPredicate::IntULE,
+            rustc_codegen_ssa::common::IntPredicate::IntSGT => IntPredicate::IntSGT,
+            rustc_codegen_ssa::common::IntPredicate::IntSGE => IntPredicate::IntSGE,
+            rustc_codegen_ssa::common::IntPredicate::IntSLT => IntPredicate::IntSLT,
+            rustc_codegen_ssa::common::IntPredicate::IntSLE => IntPredicate::IntSLE,
+        }
+    }
 }
 
 /// LLVMRealPredicate
@@ -166,6 +180,31 @@ pub enum RealPredicate {
     RealULE = 13,
     RealUNE = 14,
     RealPredicateTrue = 15,
+}
+
+impl RealPredicate {
+    pub fn from_generic(realpred: rustc_codegen_ssa::common::RealPredicate) -> Self {
+        match realpred {
+            rustc_codegen_ssa::common::RealPredicate::RealPredicateFalse =>
+                RealPredicate::RealPredicateFalse,
+            rustc_codegen_ssa::common::RealPredicate::RealOEQ => RealPredicate::RealOEQ,
+            rustc_codegen_ssa::common::RealPredicate::RealOGT => RealPredicate::RealOGT,
+            rustc_codegen_ssa::common::RealPredicate::RealOGE => RealPredicate::RealOGE,
+            rustc_codegen_ssa::common::RealPredicate::RealOLT => RealPredicate::RealOLT,
+            rustc_codegen_ssa::common::RealPredicate::RealOLE => RealPredicate::RealOLE,
+            rustc_codegen_ssa::common::RealPredicate::RealONE => RealPredicate::RealONE,
+            rustc_codegen_ssa::common::RealPredicate::RealORD => RealPredicate::RealORD,
+            rustc_codegen_ssa::common::RealPredicate::RealUNO => RealPredicate::RealUNO,
+            rustc_codegen_ssa::common::RealPredicate::RealUEQ => RealPredicate::RealUEQ,
+            rustc_codegen_ssa::common::RealPredicate::RealUGT => RealPredicate::RealUGT,
+            rustc_codegen_ssa::common::RealPredicate::RealUGE => RealPredicate::RealUGE,
+            rustc_codegen_ssa::common::RealPredicate::RealULT => RealPredicate::RealULT,
+            rustc_codegen_ssa::common::RealPredicate::RealULE => RealPredicate::RealULE,
+            rustc_codegen_ssa::common::RealPredicate::RealUNE => RealPredicate::RealUNE,
+            rustc_codegen_ssa::common::RealPredicate::RealPredicateTrue =>
+                RealPredicate::RealPredicateTrue
+        }
+    }
 }
 
 /// LLVMTypeKind
@@ -191,6 +230,30 @@ pub enum TypeKind {
     Token = 16,
 }
 
+impl TypeKind {
+    pub fn to_generic(self) -> rustc_codegen_ssa::common::TypeKind {
+        match self {
+            TypeKind::Void => rustc_codegen_ssa::common::TypeKind::Void,
+            TypeKind::Half => rustc_codegen_ssa::common::TypeKind::Half,
+            TypeKind::Float => rustc_codegen_ssa::common::TypeKind::Float,
+            TypeKind::Double => rustc_codegen_ssa::common::TypeKind::Double,
+            TypeKind::X86_FP80 => rustc_codegen_ssa::common::TypeKind::X86_FP80,
+            TypeKind::FP128 => rustc_codegen_ssa::common::TypeKind::FP128,
+            TypeKind::PPC_FP128 => rustc_codegen_ssa::common::TypeKind::PPC_FP128,
+            TypeKind::Label => rustc_codegen_ssa::common::TypeKind::Label,
+            TypeKind::Integer => rustc_codegen_ssa::common::TypeKind::Integer,
+            TypeKind::Function => rustc_codegen_ssa::common::TypeKind::Function,
+            TypeKind::Struct => rustc_codegen_ssa::common::TypeKind::Struct,
+            TypeKind::Array => rustc_codegen_ssa::common::TypeKind::Array,
+            TypeKind::Pointer => rustc_codegen_ssa::common::TypeKind::Pointer,
+            TypeKind::Vector => rustc_codegen_ssa::common::TypeKind::Vector,
+            TypeKind::Metadata => rustc_codegen_ssa::common::TypeKind::Metadata,
+            TypeKind::X86_MMX => rustc_codegen_ssa::common::TypeKind::X86_MMX,
+            TypeKind::Token => rustc_codegen_ssa::common::TypeKind::Token,
+        }
+    }
+}
+
 /// LLVMAtomicRmwBinOp
 #[derive(Copy, Clone)]
 #[repr(C)]
@@ -208,6 +271,24 @@ pub enum AtomicRmwBinOp {
     AtomicUMin = 10,
 }
 
+impl AtomicRmwBinOp {
+    pub fn from_generic(op: rustc_codegen_ssa::common::AtomicRmwBinOp) -> Self {
+        match op {
+            rustc_codegen_ssa::common::AtomicRmwBinOp::AtomicXchg => AtomicRmwBinOp::AtomicXchg,
+            rustc_codegen_ssa::common::AtomicRmwBinOp::AtomicAdd => AtomicRmwBinOp::AtomicAdd,
+            rustc_codegen_ssa::common::AtomicRmwBinOp::AtomicSub => AtomicRmwBinOp::AtomicSub,
+            rustc_codegen_ssa::common::AtomicRmwBinOp::AtomicAnd => AtomicRmwBinOp::AtomicAnd,
+            rustc_codegen_ssa::common::AtomicRmwBinOp::AtomicNand => AtomicRmwBinOp::AtomicNand,
+            rustc_codegen_ssa::common::AtomicRmwBinOp::AtomicOr => AtomicRmwBinOp::AtomicOr,
+            rustc_codegen_ssa::common::AtomicRmwBinOp::AtomicXor => AtomicRmwBinOp::AtomicXor,
+            rustc_codegen_ssa::common::AtomicRmwBinOp::AtomicMax => AtomicRmwBinOp::AtomicMax,
+            rustc_codegen_ssa::common::AtomicRmwBinOp::AtomicMin => AtomicRmwBinOp::AtomicMin,
+            rustc_codegen_ssa::common::AtomicRmwBinOp::AtomicUMax => AtomicRmwBinOp::AtomicUMax,
+            rustc_codegen_ssa::common::AtomicRmwBinOp::AtomicUMin => AtomicRmwBinOp::AtomicUMin
+        }
+    }
+}
+
 /// LLVMAtomicOrdering
 #[derive(Copy, Clone)]
 #[repr(C)]
@@ -223,6 +304,23 @@ pub enum AtomicOrdering {
     SequentiallyConsistent = 7,
 }
 
+impl AtomicOrdering {
+    pub fn from_generic(ao: rustc_codegen_ssa::common::AtomicOrdering) -> Self {
+        match ao {
+            rustc_codegen_ssa::common::AtomicOrdering::NotAtomic => AtomicOrdering::NotAtomic,
+            rustc_codegen_ssa::common::AtomicOrdering::Unordered => AtomicOrdering::Unordered,
+            rustc_codegen_ssa::common::AtomicOrdering::Monotonic => AtomicOrdering::Monotonic,
+            rustc_codegen_ssa::common::AtomicOrdering::Acquire => AtomicOrdering::Acquire,
+            rustc_codegen_ssa::common::AtomicOrdering::Release => AtomicOrdering::Release,
+            rustc_codegen_ssa::common::AtomicOrdering::AcquireRelease =>
+                AtomicOrdering::AcquireRelease,
+            rustc_codegen_ssa::common::AtomicOrdering::SequentiallyConsistent =>
+                AtomicOrdering::SequentiallyConsistent
+        }
+    }
+}
+
+
 /// LLVMRustSynchronizationScope
 #[derive(Copy, Clone)]
 #[repr(C)]
@@ -232,6 +330,18 @@ pub enum SynchronizationScope {
     Other,
     SingleThread,
     CrossThread,
+}
+
+impl SynchronizationScope {
+    pub fn from_generic(sc: rustc_codegen_ssa::common::SynchronizationScope) -> Self {
+        match sc {
+            rustc_codegen_ssa::common::SynchronizationScope::Other => SynchronizationScope::Other,
+            rustc_codegen_ssa::common::SynchronizationScope::SingleThread =>
+                SynchronizationScope::SingleThread,
+            rustc_codegen_ssa::common::SynchronizationScope::CrossThread =>
+                SynchronizationScope::CrossThread,
+        }
+    }
 }
 
 /// LLVMRustFileType
@@ -272,6 +382,15 @@ pub enum AsmDialect {
     Other,
     Att,
     Intel,
+}
+
+impl AsmDialect {
+    pub fn from_generic(asm: syntax::ast::AsmDialect) -> Self {
+        match asm {
+            syntax::ast::AsmDialect::Att => AsmDialect::Att,
+            syntax::ast::AsmDialect::Intel => AsmDialect::Intel
+        }
+    }
 }
 
 /// LLVMRustCodeGenOptLevel
@@ -363,6 +482,10 @@ extern { pub type ThinLTOData; }
 /// LLVMRustThinLTOBuffer
 extern { pub type ThinLTOBuffer; }
 
+// LLVMRustModuleNameCallback
+pub type ThinLTOModuleNameCallback =
+    unsafe extern "C" fn(*mut c_void, *const c_char, *const c_char);
+
 /// LLVMRustThinLTOModule
 #[repr(C)]
 pub struct ThinLTOModule {
@@ -443,7 +566,7 @@ pub mod debuginfo {
     pub type DIDerivedType = DIType;
     pub type DICompositeType = DIDerivedType;
     pub type DIVariable = DIDescriptor;
-    pub type DIGlobalVariable = DIDescriptor;
+    pub type DIGlobalVariableExpression = DIDescriptor;
     pub type DIArray = DIDescriptor;
     pub type DISubrange = DIDescriptor;
     pub type DIEnumerator = DIDescriptor;
@@ -483,6 +606,8 @@ pub mod debuginfo {
 extern { pub type ModuleBuffer; }
 
 extern "C" {
+    pub fn LLVMRustInstallFatalErrorHandler();
+
     // Create and destroy contexts.
     pub fn LLVMRustContextCreate(shouldDiscardNames: bool) -> &'static mut Context;
     pub fn LLVMContextDispose(C: &'static mut Context);
@@ -875,6 +1000,11 @@ extern "C" {
 
     // Memory
     pub fn LLVMBuildAlloca(B: &Builder<'a>, Ty: &'a Type, Name: *const c_char) -> &'a Value;
+    pub fn LLVMBuildArrayAlloca(B: &Builder<'a>,
+                                Ty: &'a Type,
+                                Val: &'a Value,
+                                Name: *const c_char)
+                                -> &'a Value;
     pub fn LLVMBuildLoad(B: &Builder<'a>, PointerVal: &'a Value, Name: *const c_char) -> &'a Value;
 
     pub fn LLVMBuildStore(B: &Builder<'a>, Val: &'a Value, Ptr: &'a Value) -> &'a Value;
@@ -992,6 +1122,22 @@ extern "C" {
                              Bundle: Option<&OperandBundleDef<'a>>,
                              Name: *const c_char)
                              -> &'a Value;
+    pub fn LLVMRustBuildMemCpy(B: &Builder<'a>,
+                               Dst: &'a Value,
+                               DstAlign: c_uint,
+                               Src: &'a Value,
+                               SrcAlign: c_uint,
+                               Size: &'a Value,
+                               IsVolatile: bool)
+                               -> &'a Value;
+    pub fn LLVMRustBuildMemMove(B: &Builder<'a>,
+                                Dst: &'a Value,
+                                DstAlign: c_uint,
+                                Src: &'a Value,
+                                SrcAlign: c_uint,
+                                Size: &'a Value,
+                                IsVolatile: bool)
+                                -> &'a Value;
     pub fn LLVMBuildSelect(B: &Builder<'a>,
                            If: &'a Value,
                            Then: &'a Value,
@@ -1035,42 +1181,42 @@ extern "C" {
     pub fn LLVMRustBuildVectorReduceFAdd(B: &Builder<'a>,
                                          Acc: &'a Value,
                                          Src: &'a Value)
-                                         -> Option<&'a Value>;
+                                         -> &'a Value;
     pub fn LLVMRustBuildVectorReduceFMul(B: &Builder<'a>,
                                          Acc: &'a Value,
                                          Src: &'a Value)
-                                         -> Option<&'a Value>;
+                                         -> &'a Value;
     pub fn LLVMRustBuildVectorReduceAdd(B: &Builder<'a>,
                                         Src: &'a Value)
-                                        -> Option<&'a Value>;
+                                        -> &'a Value;
     pub fn LLVMRustBuildVectorReduceMul(B: &Builder<'a>,
                                         Src: &'a Value)
-                                        -> Option<&'a Value>;
+                                        -> &'a Value;
     pub fn LLVMRustBuildVectorReduceAnd(B: &Builder<'a>,
                                         Src: &'a Value)
-                                        -> Option<&'a Value>;
+                                        -> &'a Value;
     pub fn LLVMRustBuildVectorReduceOr(B: &Builder<'a>,
                                        Src: &'a Value)
-                                       -> Option<&'a Value>;
+                                       -> &'a Value;
     pub fn LLVMRustBuildVectorReduceXor(B: &Builder<'a>,
                                         Src: &'a Value)
-                                        -> Option<&'a Value>;
+                                        -> &'a Value;
     pub fn LLVMRustBuildVectorReduceMin(B: &Builder<'a>,
                                         Src: &'a Value,
                                         IsSigned: bool)
-                                        -> Option<&'a Value>;
+                                        -> &'a Value;
     pub fn LLVMRustBuildVectorReduceMax(B: &Builder<'a>,
                                         Src: &'a Value,
                                         IsSigned: bool)
-                                        -> Option<&'a Value>;
+                                        -> &'a Value;
     pub fn LLVMRustBuildVectorReduceFMin(B: &Builder<'a>,
                                          Src: &'a Value,
                                          IsNaN: bool)
-                                         -> Option<&'a Value>;
+                                         -> &'a Value;
     pub fn LLVMRustBuildVectorReduceFMax(B: &Builder<'a>,
                                          Src: &'a Value,
                                          IsNaN: bool)
-                                         -> Option<&'a Value>;
+                                         -> &'a Value;
 
     pub fn LLVMRustBuildMinNum(
         B: &Builder<'a>,
@@ -1151,7 +1297,7 @@ extern "C" {
                                                         RunInliner: Bool);
     pub fn LLVMRustPassManagerBuilderPopulateThinLTOPassManager(
         PMB: &PassManagerBuilder,
-        PM: &PassManager) -> bool;
+        PM: &PassManager);
 
     // Stuff that's in rustllvm/ because it's not upstream yet.
 
@@ -1205,10 +1351,14 @@ extern "C" {
                              AlignStack: Bool,
                              Dialect: AsmDialect)
                              -> &Value;
+    pub fn LLVMRustInlineAsmVerify(Ty: &Type,
+                                   Constraints: *const c_char)
+                                   -> bool;
 
     pub fn LLVMRustDebugMetadataVersion() -> u32;
     pub fn LLVMRustVersionMajor() -> u32;
     pub fn LLVMRustVersionMinor() -> u32;
+    pub fn LLVMRustIsRustLLVM() -> bool;
 
     pub fn LLVMRustAddModuleFlag(M: &Module, name: *const c_char, value: u32);
 
@@ -1298,6 +1448,19 @@ extern "C" {
                                              Ty: &'a DIType)
                                              -> &'a DIDerivedType;
 
+    pub fn LLVMRustDIBuilderCreateVariantMemberType(Builder: &DIBuilder<'a>,
+                                                    Scope: &'a DIScope,
+                                                    Name: *const c_char,
+                                                    File: &'a DIFile,
+                                                    LineNumber: c_uint,
+                                                    SizeInBits: u64,
+                                                    AlignInBits: u32,
+                                                    OffsetInBits: u64,
+                                                    Discriminant: Option<&'a Value>,
+                                                    Flags: DIFlags,
+                                                    Ty: &'a DIType)
+                                                    -> &'a DIType;
+
     pub fn LLVMRustDIBuilderCreateLexicalBlock(Builder: &DIBuilder<'a>,
                                                Scope: &'a DIScope,
                                                File: &'a DIFile,
@@ -1321,7 +1484,7 @@ extern "C" {
                                                  Val: &'a Value,
                                                  Decl: Option<&'a DIDescriptor>,
                                                  AlignInBits: u32)
-                                                 -> &'a DIGlobalVariable;
+                                                 -> &'a DIGlobalVariableExpression;
 
     pub fn LLVMRustDIBuilderCreateVariable(Builder: &DIBuilder<'a>,
                                            Tag: c_uint,
@@ -1375,7 +1538,8 @@ extern "C" {
                                                   SizeInBits: u64,
                                                   AlignInBits: u32,
                                                   Elements: &'a DIArray,
-                                                  ClassType: &'a DIType)
+                                                  ClassType: &'a DIType,
+                                                  IsFixed: bool)
                                                   -> &'a DIType;
 
     pub fn LLVMRustDIBuilderCreateUnionType(Builder: &DIBuilder<'a>,
@@ -1390,6 +1554,19 @@ extern "C" {
                                             RunTimeLang: c_uint,
                                             UniqueId: *const c_char)
                                             -> &'a DIType;
+
+    pub fn LLVMRustDIBuilderCreateVariantPart(Builder: &DIBuilder<'a>,
+                                              Scope: &'a DIScope,
+                                              Name: *const c_char,
+                                              File: &'a DIFile,
+                                              LineNo: c_uint,
+                                              SizeInBits: u64,
+                                              AlignInBits: u32,
+                                              Flags: DIFlags,
+                                              Discriminator: Option<&'a DIDerivedType>,
+                                              Elements: &'a DIArray,
+                                              UniqueId: *const c_char)
+                                              -> &'a DIDerivedType;
 
     pub fn LLVMSetUnnamedAddr(GlobalVar: &Value, UnnamedAddr: Bool);
 
@@ -1410,9 +1587,10 @@ extern "C" {
                                             LineNo: c_uint)
                                             -> &'a DINameSpace;
 
-    pub fn LLVMRustDICompositeTypeSetTypeArray(Builder: &DIBuilder<'a>,
-                                               CompositeType: &'a DIType,
-                                               TypeArray: &'a DIArray);
+    pub fn LLVMRustDICompositeTypeReplaceArrays(Builder: &DIBuilder<'a>,
+                                                CompositeType: &'a DIType,
+                                                Elements: Option<&'a DIArray>,
+                                                Params: Option<&'a DIArray>);
 
 
     pub fn LLVMRustDIBuilderCreateDebugLocation(Context: &'a Context,
@@ -1444,6 +1622,7 @@ extern "C" {
     pub fn LLVMRustPrintTargetCPUs(T: &TargetMachine);
     pub fn LLVMRustPrintTargetFeatures(T: &TargetMachine);
 
+    pub fn LLVMRustGetHostCPUName(len: *mut usize) -> *const c_char;
     pub fn LLVMRustCreateTargetMachine(Triple: *const c_char,
                                        CPU: *const c_char,
                                        Features: *const c_char,
@@ -1455,7 +1634,9 @@ extern "C" {
                                        FunctionSections: bool,
                                        DataSections: bool,
                                        TrapUnreachable: bool,
-                                       Singlethread: bool)
+                                       Singlethread: bool,
+                                       AsmComments: bool,
+                                       EmitStackSizeSection: bool)
                                        -> Option<&'static mut TargetMachine>;
     pub fn LLVMRustDisposeTargetMachine(T: &'static mut TargetMachine);
     pub fn LLVMRustAddAnalysisPasses(T: &'a TargetMachine, PM: &PassManager<'a>, M: &'a Module);
@@ -1564,7 +1745,7 @@ extern "C" {
                                 -> LLVMRustResult;
     pub fn LLVMRustArchiveMemberNew(Filename: *const c_char,
                                     Name: *const c_char,
-                                    Child: Option<&'a ArchiveChild>)
+                                    Child: Option<&ArchiveChild<'a>>)
                                     -> &'a mut RustArchiveMember<'a>;
     pub fn LLVMRustArchiveMemberFree(Member: &'a mut RustArchiveMember<'a>);
 
@@ -1587,8 +1768,6 @@ extern "C" {
     pub fn LLVMRustModuleBufferFree(p: &'static mut ModuleBuffer);
     pub fn LLVMRustModuleCost(M: &Module) -> u64;
 
-    pub fn LLVMRustThinLTOAvailable() -> bool;
-    pub fn LLVMRustPGOAvailable() -> bool;
     pub fn LLVMRustThinLTOBufferCreate(M: &Module) -> &'static mut ThinLTOBuffer;
     pub fn LLVMRustThinLTOBufferFree(M: &'static mut ThinLTOBuffer);
     pub fn LLVMRustThinLTOBufferPtr(M: &ThinLTOBuffer) -> *const c_char;
@@ -1615,6 +1794,11 @@ extern "C" {
         Data: &ThinLTOData,
         Module: &Module,
     ) -> bool;
+    pub fn LLVMRustGetThinLTOModuleImports(
+        Data: *const ThinLTOData,
+        ModuleNameCallback: ThinLTOModuleNameCallback,
+        CallbackPayload: *mut c_void,
+    );
     pub fn LLVMRustFreeThinLTOData(Data: &'static mut ThinLTOData);
     pub fn LLVMRustParseBitcodeForThinLTO(
         Context: &Context,

@@ -48,6 +48,65 @@
 
 #![stable(feature = "rust1", since = "1.0.0")]
 
+/// An identity function.
+///
+/// Two things are important to note about this function:
+///
+/// - It is not always equivalent to a closure like `|x| x` since the
+///   closure may coerce `x` into a different type.
+///
+/// - It moves the input `x` passed to the function.
+///
+/// While it might seem strange to have a function that just returns back the
+/// input, there are some interesting uses.
+///
+/// # Examples
+///
+/// Using `identity` to do nothing among other interesting functions:
+///
+/// ```rust
+/// #![feature(convert_id)]
+/// use std::convert::identity;
+///
+/// fn manipulation(x: u32) -> u32 {
+///     // Let's assume that this function does something interesting.
+///     x + 1
+/// }
+///
+/// let _arr = &[identity, manipulation];
+/// ```
+///
+/// Using `identity` to get a function that changes nothing in a conditional:
+///
+/// ```rust
+/// #![feature(convert_id)]
+/// use std::convert::identity;
+///
+/// # let condition = true;
+///
+/// # fn manipulation(x: u32) -> u32 { x + 1 }
+///
+/// let do_stuff = if condition { manipulation } else { identity };
+///
+/// // do more interesting stuff..
+///
+/// let _results = do_stuff(42);
+/// ```
+///
+/// Using `identity` to keep the `Some` variants of an iterator of `Option<T>`:
+///
+/// ```rust
+/// #![feature(convert_id)]
+/// use std::convert::identity;
+///
+/// let iter = vec![Some(1), None, Some(3)].into_iter();
+/// let filtered = iter.filter_map(identity).collect::<Vec<_>>();
+/// assert_eq!(vec![1, 3], filtered);
+/// ```
+#[unstable(feature = "convert_id", issue = "53500")]
+#[inline]
+pub const fn identity<T>(x: T) -> T { x }
+
 /// A cheap reference-to-reference conversion. Used to convert a value to a
 /// reference value within generic code.
 ///
@@ -268,7 +327,8 @@ pub trait Into<T>: Sized {
 /// An example usage for error handling:
 ///
 /// ```
-/// use std::io::{self, Read};
+/// use std::fs;
+/// use std::io;
 /// use std::num;
 ///
 /// enum CliError {
@@ -289,9 +349,7 @@ pub trait Into<T>: Sized {
 /// }
 ///
 /// fn open_and_parse_file(file_name: &str) -> Result<i32, CliError> {
-///     let mut file = std::fs::File::open("test")?;
-///     let mut contents = String::new();
-///     file.read_to_string(&mut contents)?;
+///     let mut contents = fs::read_to_string(&file_name)?;
 ///     let num: i32 = contents.trim().parse()?;
 ///     Ok(num)
 /// }
@@ -347,7 +405,7 @@ pub trait TryFrom<T>: Sized {
 
 // As lifts over &
 #[stable(feature = "rust1", since = "1.0.0")]
-impl<'a, T: ?Sized, U: ?Sized> AsRef<U> for &'a T where T: AsRef<U>
+impl<T: ?Sized, U: ?Sized> AsRef<U> for &T where T: AsRef<U>
 {
     fn as_ref(&self) -> &U {
         <T as AsRef<U>>::as_ref(*self)
@@ -356,7 +414,7 @@ impl<'a, T: ?Sized, U: ?Sized> AsRef<U> for &'a T where T: AsRef<U>
 
 // As lifts over &mut
 #[stable(feature = "rust1", since = "1.0.0")]
-impl<'a, T: ?Sized, U: ?Sized> AsRef<U> for &'a mut T where T: AsRef<U>
+impl<T: ?Sized, U: ?Sized> AsRef<U> for &mut T where T: AsRef<U>
 {
     fn as_ref(&self) -> &U {
         <T as AsRef<U>>::as_ref(*self)
@@ -373,7 +431,7 @@ impl<'a, T: ?Sized, U: ?Sized> AsRef<U> for &'a mut T where T: AsRef<U>
 
 // AsMut lifts over &mut
 #[stable(feature = "rust1", since = "1.0.0")]
-impl<'a, T: ?Sized, U: ?Sized> AsMut<U> for &'a mut T where T: AsMut<U>
+impl<T: ?Sized, U: ?Sized> AsMut<U> for &mut T where T: AsMut<U>
 {
     fn as_mut(&mut self) -> &mut U {
         (*self).as_mut()

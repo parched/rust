@@ -160,9 +160,9 @@ impl IpAddr {
     /// ```
     #[stable(feature = "ip_shared", since = "1.12.0")]
     pub fn is_unspecified(&self) -> bool {
-        match *self {
-            IpAddr::V4(ref a) => a.is_unspecified(),
-            IpAddr::V6(ref a) => a.is_unspecified(),
+        match self {
+            IpAddr::V4(ip) => ip.is_unspecified(),
+            IpAddr::V6(ip) => ip.is_unspecified(),
         }
     }
 
@@ -185,9 +185,9 @@ impl IpAddr {
     /// ```
     #[stable(feature = "ip_shared", since = "1.12.0")]
     pub fn is_loopback(&self) -> bool {
-        match *self {
-            IpAddr::V4(ref a) => a.is_loopback(),
-            IpAddr::V6(ref a) => a.is_loopback(),
+        match self {
+            IpAddr::V4(ip) => ip.is_loopback(),
+            IpAddr::V6(ip) => ip.is_loopback(),
         }
     }
 
@@ -214,9 +214,9 @@ impl IpAddr {
     /// }
     /// ```
     pub fn is_global(&self) -> bool {
-        match *self {
-            IpAddr::V4(ref a) => a.is_global(),
-            IpAddr::V6(ref a) => a.is_global(),
+        match self {
+            IpAddr::V4(ip) => ip.is_global(),
+            IpAddr::V6(ip) => ip.is_global(),
         }
     }
 
@@ -239,9 +239,9 @@ impl IpAddr {
     /// ```
     #[stable(feature = "ip_shared", since = "1.12.0")]
     pub fn is_multicast(&self) -> bool {
-        match *self {
-            IpAddr::V4(ref a) => a.is_multicast(),
-            IpAddr::V6(ref a) => a.is_multicast(),
+        match self {
+            IpAddr::V4(ip) => ip.is_multicast(),
+            IpAddr::V6(ip) => ip.is_multicast(),
         }
     }
 
@@ -268,9 +268,9 @@ impl IpAddr {
     /// }
     /// ```
     pub fn is_documentation(&self) -> bool {
-        match *self {
-            IpAddr::V4(ref a) => a.is_documentation(),
-            IpAddr::V6(ref a) => a.is_documentation(),
+        match self {
+            IpAddr::V4(ip) => ip.is_documentation(),
+            IpAddr::V6(ip) => ip.is_documentation(),
         }
     }
 
@@ -293,7 +293,7 @@ impl IpAddr {
     /// ```
     #[stable(feature = "ipaddr_checker", since = "1.16.0")]
     pub fn is_ipv4(&self) -> bool {
-        match *self {
+        match self {
             IpAddr::V4(_) => true,
             IpAddr::V6(_) => false,
         }
@@ -318,7 +318,7 @@ impl IpAddr {
     /// ```
     #[stable(feature = "ipaddr_checker", since = "1.16.0")]
     pub fn is_ipv6(&self) -> bool {
-        match *self {
+        match self {
             IpAddr::V4(_) => false,
             IpAddr::V6(_) => true,
         }
@@ -357,15 +357,12 @@ impl Ipv4Addr {
     /// # Examples
     ///
     /// ```
-    /// #![feature(ip_constructors)]
     /// use std::net::Ipv4Addr;
     ///
     /// let addr = Ipv4Addr::LOCALHOST;
     /// assert_eq!(addr, Ipv4Addr::new(127, 0, 0, 1));
     /// ```
-    #[unstable(feature = "ip_constructors",
-               reason = "requires greater scrutiny before stabilization",
-               issue = "44582")]
+    #[stable(feature = "ip_constructors", since = "1.30.0")]
     pub const LOCALHOST: Self = Ipv4Addr::new(127, 0, 0, 1);
 
     /// An IPv4 address representing an unspecified address: 0.0.0.0
@@ -373,15 +370,12 @@ impl Ipv4Addr {
     /// # Examples
     ///
     /// ```
-    /// #![feature(ip_constructors)]
     /// use std::net::Ipv4Addr;
     ///
     /// let addr = Ipv4Addr::UNSPECIFIED;
     /// assert_eq!(addr, Ipv4Addr::new(0, 0, 0, 0));
     /// ```
-    #[unstable(feature = "ip_constructors",
-               reason = "requires greater scrutiny before stabilization",
-               issue = "44582")]
+    #[stable(feature = "ip_constructors", since = "1.30.0")]
     pub const UNSPECIFIED: Self = Ipv4Addr::new(0, 0, 0, 0);
 
     /// An IPv4 address representing the broadcast address: 255.255.255.255
@@ -389,15 +383,12 @@ impl Ipv4Addr {
     /// # Examples
     ///
     /// ```
-    /// #![feature(ip_constructors)]
     /// use std::net::Ipv4Addr;
     ///
     /// let addr = Ipv4Addr::BROADCAST;
     /// assert_eq!(addr, Ipv4Addr::new(255, 255, 255, 255));
     /// ```
-    #[unstable(feature = "ip_constructors",
-               reason = "requires greater scrutiny before stabilization",
-               issue = "44582")]
+    #[stable(feature = "ip_constructors", since = "1.30.0")]
     pub const BROADCAST: Self = Ipv4Addr::new(255, 255, 255, 255);
 
     /// Returns the four eight-bit integers that make up this address.
@@ -433,7 +424,7 @@ impl Ipv4Addr {
     /// assert_eq!(Ipv4Addr::new(45, 22, 13, 197).is_unspecified(), false);
     /// ```
     #[stable(feature = "ip_shared", since = "1.12.0")]
-    pub fn is_unspecified(&self) -> bool {
+    pub const fn is_unspecified(&self) -> bool {
         self.inner.s_addr == 0
     }
 
@@ -483,11 +474,11 @@ impl Ipv4Addr {
     /// ```
     #[stable(since = "1.7.0", feature = "ip_17")]
     pub fn is_private(&self) -> bool {
-        match (self.octets()[0], self.octets()[1]) {
-            (10, _) => true,
-            (172, b) if b >= 16 && b <= 31 => true,
-            (192, 168) => true,
-            _ => false
+        match self.octets() {
+            [10, ..] => true,
+            [172, b, ..] if b >= 16 && b <= 31 => true,
+            [192, 168, ..] => true,
+            _ => false,
         }
     }
 
@@ -509,7 +500,10 @@ impl Ipv4Addr {
     /// ```
     #[stable(since = "1.7.0", feature = "ip_17")]
     pub fn is_link_local(&self) -> bool {
-        self.octets()[0] == 169 && self.octets()[1] == 254
+        match self.octets() {
+            [169, 254, ..] => true,
+            _ => false,
+        }
     }
 
     /// Returns [`true`] if the address appears to be globally routable.
@@ -612,11 +606,11 @@ impl Ipv4Addr {
     /// ```
     #[stable(since = "1.7.0", feature = "ip_17")]
     pub fn is_documentation(&self) -> bool {
-        match(self.octets()[0], self.octets()[1], self.octets()[2], self.octets()[3]) {
-            (192, 0, 2, _) => true,
-            (198, 51, 100, _) => true,
-            (203, 0, 113, _) => true,
-            _ => false
+        match self.octets() {
+            [192, 0, 2, _] => true,
+            [198, 51, 100, _] => true,
+            [203, 0, 113, _] => true,
+            _ => false,
         }
     }
 
@@ -666,9 +660,9 @@ impl Ipv4Addr {
 #[stable(feature = "ip_addr", since = "1.7.0")]
 impl fmt::Display for IpAddr {
     fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
-        match *self {
-            IpAddr::V4(ref a) => a.fmt(fmt),
-            IpAddr::V6(ref a) => a.fmt(fmt),
+        match self {
+            IpAddr::V4(ip) => ip.fmt(fmt),
+            IpAddr::V6(ip) => ip.fmt(fmt),
         }
     }
 }
@@ -717,8 +711,8 @@ impl PartialEq for Ipv4Addr {
 #[stable(feature = "ip_cmp", since = "1.16.0")]
 impl PartialEq<Ipv4Addr> for IpAddr {
     fn eq(&self, other: &Ipv4Addr) -> bool {
-        match *self {
-            IpAddr::V4(ref v4) => v4 == other,
+        match self {
+            IpAddr::V4(v4) => v4 == other,
             IpAddr::V6(_) => false,
         }
     }
@@ -727,8 +721,8 @@ impl PartialEq<Ipv4Addr> for IpAddr {
 #[stable(feature = "ip_cmp", since = "1.16.0")]
 impl PartialEq<IpAddr> for Ipv4Addr {
     fn eq(&self, other: &IpAddr) -> bool {
-        match *other {
-            IpAddr::V4(ref v4) => self == v4,
+        match other {
+            IpAddr::V4(v4) => self == v4,
             IpAddr::V6(_) => false,
         }
     }
@@ -755,8 +749,8 @@ impl PartialOrd for Ipv4Addr {
 #[stable(feature = "ip_cmp", since = "1.16.0")]
 impl PartialOrd<Ipv4Addr> for IpAddr {
     fn partial_cmp(&self, other: &Ipv4Addr) -> Option<Ordering> {
-        match *self {
-            IpAddr::V4(ref v4) => v4.partial_cmp(other),
+        match self {
+            IpAddr::V4(v4) => v4.partial_cmp(other),
             IpAddr::V6(_) => Some(Ordering::Greater),
         }
     }
@@ -765,8 +759,8 @@ impl PartialOrd<Ipv4Addr> for IpAddr {
 #[stable(feature = "ip_cmp", since = "1.16.0")]
 impl PartialOrd<IpAddr> for Ipv4Addr {
     fn partial_cmp(&self, other: &IpAddr) -> Option<Ordering> {
-        match *other {
-            IpAddr::V4(ref v4) => self.partial_cmp(v4),
+        match other {
+            IpAddr::V4(v4) => self.partial_cmp(v4),
             IpAddr::V6(_) => Some(Ordering::Less),
         }
     }
@@ -858,7 +852,7 @@ impl From<[u8; 4]> for IpAddr {
 impl Ipv6Addr {
     /// Creates a new IPv6 address from eight 16-bit segments.
     ///
-    /// The result will represent the IP address a:b:c:d:e:f:g:h.
+    /// The result will represent the IP address `a:b:c:d:e:f:g:h`.
     ///
     /// # Examples
     ///
@@ -868,7 +862,6 @@ impl Ipv6Addr {
     /// let addr = Ipv6Addr::new(0, 0, 0, 0, 0, 0xffff, 0xc00a, 0x2ff);
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
-    #[rustc_const_unstable(feature = "const_ip")]
     pub const fn new(a: u16, b: u16, c: u16, d: u16, e: u16, f: u16,
                      g: u16, h: u16) -> Ipv6Addr {
         Ipv6Addr {
@@ -893,15 +886,12 @@ impl Ipv6Addr {
     /// # Examples
     ///
     /// ```
-    /// #![feature(ip_constructors)]
     /// use std::net::Ipv6Addr;
     ///
     /// let addr = Ipv6Addr::LOCALHOST;
     /// assert_eq!(addr, Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 1));
     /// ```
-    #[unstable(feature = "ip_constructors",
-               reason = "requires greater scrutiny before stabilization",
-               issue = "44582")]
+    #[stable(feature = "ip_constructors", since = "1.30.0")]
     pub const LOCALHOST: Self = Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 1);
 
     /// An IPv6 address representing the unspecified address: `::`
@@ -909,15 +899,12 @@ impl Ipv6Addr {
     /// # Examples
     ///
     /// ```
-    /// #![feature(ip_constructors)]
     /// use std::net::Ipv6Addr;
     ///
     /// let addr = Ipv6Addr::UNSPECIFIED;
     /// assert_eq!(addr, Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 0));
     /// ```
-    #[unstable(feature = "ip_constructors",
-               reason = "requires greater scrutiny before stabilization",
-               issue = "44582")]
+    #[stable(feature = "ip_constructors", since = "1.30.0")]
     pub const UNSPECIFIED: Self = Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 0);
 
     /// Returns the eight 16-bit segments that make up this address.
@@ -1236,7 +1223,7 @@ impl Ipv6Addr {
     ///            [255, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
     /// ```
     #[stable(feature = "ipv6_to_octets", since = "1.12.0")]
-    pub fn octets(&self) -> [u8; 16] {
+    pub const fn octets(&self) -> [u8; 16] {
         self.inner.s6_addr
     }
 }
@@ -1335,9 +1322,9 @@ impl PartialEq for Ipv6Addr {
 #[stable(feature = "ip_cmp", since = "1.16.0")]
 impl PartialEq<IpAddr> for Ipv6Addr {
     fn eq(&self, other: &IpAddr) -> bool {
-        match *other {
+        match other {
             IpAddr::V4(_) => false,
-            IpAddr::V6(ref v6) => self == v6,
+            IpAddr::V6(v6) => self == v6,
         }
     }
 }
@@ -1345,9 +1332,9 @@ impl PartialEq<IpAddr> for Ipv6Addr {
 #[stable(feature = "ip_cmp", since = "1.16.0")]
 impl PartialEq<Ipv6Addr> for IpAddr {
     fn eq(&self, other: &Ipv6Addr) -> bool {
-        match *self {
+        match self {
             IpAddr::V4(_) => false,
-            IpAddr::V6(ref v6) => v6 == other,
+            IpAddr::V6(v6) => v6 == other,
         }
     }
 }
@@ -1372,9 +1359,9 @@ impl PartialOrd for Ipv6Addr {
 #[stable(feature = "ip_cmp", since = "1.16.0")]
 impl PartialOrd<Ipv6Addr> for IpAddr {
     fn partial_cmp(&self, other: &Ipv6Addr) -> Option<Ordering> {
-        match *self {
+        match self {
             IpAddr::V4(_) => Some(Ordering::Less),
-            IpAddr::V6(ref v6) => v6.partial_cmp(other),
+            IpAddr::V6(v6) => v6.partial_cmp(other),
         }
     }
 }
@@ -1382,9 +1369,9 @@ impl PartialOrd<Ipv6Addr> for IpAddr {
 #[stable(feature = "ip_cmp", since = "1.16.0")]
 impl PartialOrd<IpAddr> for Ipv6Addr {
     fn partial_cmp(&self, other: &IpAddr) -> Option<Ordering> {
-        match *other {
+        match other {
             IpAddr::V4(_) => Some(Ordering::Greater),
-            IpAddr::V6(ref v6) => self.partial_cmp(v6),
+            IpAddr::V6(v6) => self.partial_cmp(v6),
         }
     }
 }

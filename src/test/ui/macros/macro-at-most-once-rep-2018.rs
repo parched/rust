@@ -10,24 +10,22 @@
 
 // Tests that `?` is a Kleene op and not a macro separator in the 2018 edition.
 
-// compile-flags: --edition=2018
-
-#![feature(macro_at_most_once_rep)]
+// edition:2018
 
 macro_rules! foo {
-    ($(a)?) => {}
+    ($(a)?) => {};
 }
 
 macro_rules! baz {
-    ($(a),?) => {} //~ERROR the `?` macro repetition operator
+    ($(a),?) => {}; //~ERROR the `?` macro repetition operator
 }
 
 macro_rules! barplus {
-    ($(a)?+) => {} // ok. matches "a+" and "+"
+    ($(a)?+) => {}; // ok. matches "a+" and "+"
 }
 
 macro_rules! barstar {
-    ($(a)?*) => {} // ok. matches "a*" and "*"
+    ($(a)?*) => {}; // ok. matches "a*" and "*"
 }
 
 pub fn main() {

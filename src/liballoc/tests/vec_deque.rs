@@ -861,7 +861,7 @@ fn test_as_slices() {
         ring.push_back(i);
 
         let (left, right) = ring.as_slices();
-        let expected: Vec<_> = (0..i + 1).collect();
+        let expected: Vec<_> = (0..=i).collect();
         assert_eq!(left, &expected[..]);
         assert_eq!(right, []);
     }
@@ -869,7 +869,7 @@ fn test_as_slices() {
     for j in -last..0 {
         ring.push_front(j);
         let (left, right) = ring.as_slices();
-        let expected_left: Vec<_> = (-last..j + 1).rev().collect();
+        let expected_left: Vec<_> = (-last..=j).rev().collect();
         let expected_right: Vec<_> = (0..first).collect();
         assert_eq!(left, &expected_left[..]);
         assert_eq!(right, &expected_right[..]);
@@ -889,7 +889,7 @@ fn test_as_mut_slices() {
         ring.push_back(i);
 
         let (left, right) = ring.as_mut_slices();
-        let expected: Vec<_> = (0..i + 1).collect();
+        let expected: Vec<_> = (0..=i).collect();
         assert_eq!(left, &expected[..]);
         assert_eq!(right, []);
     }
@@ -897,7 +897,7 @@ fn test_as_mut_slices() {
     for j in -last..0 {
         ring.push_front(j);
         let (left, right) = ring.as_mut_slices();
-        let expected_left: Vec<_> = (-last..j + 1).rev().collect();
+        let expected_left: Vec<_> = (-last..=j).rev().collect();
         let expected_right: Vec<_> = (0..first).collect();
         assert_eq!(left, &expected_left[..]);
         assert_eq!(right, &expected_right[..]);
@@ -926,6 +926,107 @@ fn test_append() {
     b.append(&mut a);
     assert_eq!(b.iter().cloned().collect::<Vec<_>>(), [1, 2, 3, 4, 5, 6]);
     assert_eq!(a.iter().cloned().collect::<Vec<_>>(), []);
+}
+
+#[test]
+fn test_append_permutations() {
+    fn construct_vec_deque(
+        push_back: usize,
+        pop_back: usize,
+        push_front: usize,
+        pop_front: usize,
+    ) -> VecDeque<usize> {
+        let mut out = VecDeque::new();
+        for a in 0..push_back {
+            out.push_back(a);
+        }
+        for b in 0..push_front {
+            out.push_front(push_back + b);
+        }
+        for _ in 0..pop_back {
+            out.pop_back();
+        }
+        for _ in 0..pop_front {
+            out.pop_front();
+        }
+        out
+    }
+
+    const MAX: usize = 5;
+
+    // Many different permutations of both the `VecDeque` getting appended to
+    // and the one getting appended are generated to check `append`.
+    // This ensures all 6 code paths of `append` are tested.
+    for src_push_back in 0..MAX {
+        for src_push_front in 0..MAX {
+            // doesn't pop more values than are pushed
+            for src_pop_back in 0..(src_push_back + src_push_front) {
+                for src_pop_front in 0..(src_push_back + src_push_front - src_pop_back) {
+
+                    let src = construct_vec_deque(
+                        src_push_back,
+                        src_pop_back,
+                        src_push_front,
+                        src_pop_front,
+                    );
+
+                    for dst_push_back in 0..MAX {
+                        for dst_push_front in 0..MAX {
+                            for dst_pop_back in 0..(dst_push_back + dst_push_front) {
+                                for dst_pop_front
+                                    in 0..(dst_push_back + dst_push_front - dst_pop_back)
+                                {
+                                    let mut dst = construct_vec_deque(
+                                        dst_push_back,
+                                        dst_pop_back,
+                                        dst_push_front,
+                                        dst_pop_front,
+                                    );
+                                    let mut src = src.clone();
+
+                                    // Assert that appending `src` to `dst` gives the same order
+                                    // of values as iterating over both in sequence.
+                                    let correct = dst
+                                        .iter()
+                                        .chain(src.iter())
+                                        .cloned()
+                                        .collect::<Vec<usize>>();
+                                    dst.append(&mut src);
+                                    assert_eq!(dst, correct);
+                                    assert!(src.is_empty());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+struct DropCounter<'a> {
+    count: &'a mut u32,
+}
+
+impl<'a> Drop for DropCounter<'a> {
+    fn drop(&mut self) {
+        *self.count += 1;
+    }
+}
+
+#[test]
+fn test_append_double_drop() {
+    let (mut count_a, mut count_b) = (0, 0);
+    {
+        let mut a = VecDeque::new();
+        let mut b = VecDeque::new();
+        a.push_back(DropCounter { count: &mut count_a });
+        b.push_back(DropCounter { count: &mut count_b });
+
+        a.append(&mut b);
+    }
+    assert_eq!(count_a, 1);
+    assert_eq!(count_b, 1);
 }
 
 #[test]

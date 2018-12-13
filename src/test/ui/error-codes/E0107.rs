@@ -20,14 +20,14 @@ enum Bar {
 struct Baz<'a, 'b, 'c> {
     buzz: Buzz<'a>,
     //~^ ERROR E0107
-    //~| expected 2 lifetime parameters
+    //~| expected 2 lifetime arguments
     bar: Bar<'a>,
     //~^ ERROR E0107
-    //~| unexpected lifetime parameter
+    //~| unexpected lifetime argument
     foo2: Foo<'a, 'b, 'c>,
     //~^ ERROR E0107
-    //~| 2 unexpected lifetime parameters
+    //~| unexpected lifetime argument
+    //~| unexpected lifetime argument
 }
 
-fn main() {
-}
+fn main() {}

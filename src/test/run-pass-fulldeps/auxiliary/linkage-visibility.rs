@@ -8,6 +8,8 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+// ignore-musl - dlsym doesn't see symbols without "-C link-arg=-Wl,--export-dynamic"
+
 #![feature(rustc_private)]
 
 // We're testing linkage visibility; the compiler warns us, but we want to
@@ -39,7 +41,7 @@ pub fn test() {
     let lib = DynamicLibrary::open(None).unwrap();
     unsafe {
         assert!(lib.symbol::<isize>("foo").is_ok());
-        assert!(lib.symbol::<isize>("baz").is_err());
-        assert!(lib.symbol::<isize>("bar").is_err());
+        assert!(lib.symbol::<isize>("baz").is_ok());
+        assert!(lib.symbol::<isize>("bar").is_ok());
     }
 }

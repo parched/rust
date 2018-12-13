@@ -10,9 +10,9 @@
 
 // Unresolved multi-segment attributes are not treated as custom.
 
-#![feature(custom_attribute, proc_macro_path_invoc)]
+#![feature(custom_attribute)]
 
 mod existent {}
 
-#[existent::nonexistent] //~ ERROR failed to resolve. Could not find `nonexistent` in `existent`
+#[existent::nonexistent] //~ ERROR failed to resolve: could not find `nonexistent` in `existent`
 fn main() {}

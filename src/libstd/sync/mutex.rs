@@ -69,7 +69,7 @@ use sys_common::poison::{self, TryLockError, TryLockResult, LockResult};
 ///
 /// let (tx, rx) = channel();
 /// for _ in 0..N {
-///     let (data, tx) = (data.clone(), tx.clone());
+///     let (data, tx) = (Arc::clone(&data), tx.clone());
 ///     thread::spawn(move || {
 ///         // The shared state can only be accessed once the lock is held.
 ///         // Our non-atomic increment is safe because we're the only thread
@@ -386,8 +386,6 @@ unsafe impl<#[may_dangle] T: ?Sized> Drop for Mutex<T> {
 impl<T> From<T> for Mutex<T> {
     /// Creates a new mutex in an unlocked state ready for use.
     /// This is equivalent to [`Mutex::new`].
-    ///
-    /// [`Mutex::new`]: #method.new
     fn from(t: T) -> Self {
         Mutex::new(t)
     }

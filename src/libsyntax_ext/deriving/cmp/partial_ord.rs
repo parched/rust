@@ -178,7 +178,7 @@ pub fn cs_partial_cmp(cx: &mut ExtCtxt, span: Span, substr: &Substructure) -> P<
 
                 cx.expr_match(span, new, vec![eq_arm, neq_arm])
             },
-            equals_expr.clone(),
+            equals_expr,
             Box::new(|cx, span, (self_args, tag_tuple), _non_self_args| {
         if self_args.len() != 2 {
             cx.span_bug(span, "not exactly 2 arguments in `derive(PartialOrd)`")
@@ -227,7 +227,7 @@ fn cs_op(less: bool,
     let fold = cs_fold1(false, // need foldr
         |cx, span, subexpr, self_f, other_fs| {
             // build up a series of `partial_cmp`s from the inside
-            // out (hence foldr) to get lexical ordering, i.e. for op ==
+            // out (hence foldr) to get lexical ordering, i.e., for op ==
             // `ast::lt`
             //
             // ```

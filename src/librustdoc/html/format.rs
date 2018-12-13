@@ -553,6 +553,9 @@ fn fmt_type(t: &clean::Type, f: &mut fmt::Formatter, use_absolute: bool) -> fmt:
             f.write_str(name)
         }
         clean::ResolvedPath{ did, ref typarams, ref path, is_generic } => {
+            if typarams.is_some() {
+                f.write_str("dyn ")?;
+            }
             // Paths like T::Output and Self::Output should be rendered with all segments
             resolved_path(f, did, path, is_generic, use_absolute)?;
             tybounds(f, typarams)
@@ -620,7 +623,7 @@ fn fmt_type(t: &clean::Type, f: &mut fmt::Formatter, use_absolute: bool) -> fmt:
         clean::BorrowedRef{ lifetime: ref l, mutability, type_: ref ty} => {
             let lt = match *l {
                 Some(ref l) => format!("{} ", *l),
-                _ => "".to_string(),
+                _ => String::new(),
             };
             let m = MutableSpace(mutability);
             let amp = if f.alternate() {

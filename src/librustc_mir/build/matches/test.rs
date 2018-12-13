@@ -18,10 +18,11 @@
 use build::Builder;
 use build::matches::{Candidate, MatchPair, Test, TestKind};
 use hair::*;
+use rustc_data_structures::bit_set::BitSet;
 use rustc_data_structures::fx::FxHashMap;
-use rustc_data_structures::bitvec::BitArray;
 use rustc::ty::{self, Ty};
 use rustc::ty::util::IntTypeExt;
+use rustc::ty::layout::VariantIdx;
 use rustc::mir::*;
 use rustc::hir::{RangeEnd, Mutability};
 use syntax_pos::Span;
@@ -30,7 +31,7 @@ use std::cmp::Ordering;
 impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
     /// Identifies what test is needed to decide if `match_pair` is applicable.
     ///
-    /// It is a bug to call this with a simplifyable pattern.
+    /// It is a bug to call this with a simplifiable pattern.
     pub fn test<'pat>(&mut self, match_pair: &MatchPair<'pat, 'tcx>) -> Test<'tcx> {
         match *match_pair.pattern.kind {
             PatternKind::Variant { ref adt_def, substs: _, variant_index: _, subpatterns: _ } => {
@@ -38,7 +39,7 @@ impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
                     span: match_pair.pattern.span,
                     kind: TestKind::Switch {
                         adt_def: adt_def.clone(),
-                        variants: BitArray::new(adt_def.variants.len()),
+                        variants: BitSet::new_empty(adt_def.variants.len()),
                     },
                 }
             }
@@ -55,7 +56,7 @@ impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
                         // these maps are empty to start; cases are
                         // added below in add_cases_to_switch
                         options: vec![],
-                        indices: FxHashMap(),
+                        indices: Default::default(),
                     }
                 }
             }
@@ -70,13 +71,14 @@ impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
                 }
             }
 
-            PatternKind::Range { lo, hi, end } => {
+            PatternKind::Range { lo, hi, ty, end } => {
+                assert!(ty == match_pair.pattern.ty);
                 Test {
                     span: match_pair.pattern.span,
                     kind: TestKind::Range {
                         lo,
                         hi,
-                        ty: match_pair.pattern.ty.clone(),
+                        ty,
                         end,
                     },
                 }
@@ -96,6 +98,7 @@ impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
                 }
             }
 
+            PatternKind::AscribeUserType { .. } |
             PatternKind::Array { .. } |
             PatternKind::Slice { .. } |
             PatternKind::Wild |
@@ -138,6 +141,7 @@ impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
             PatternKind::Array { .. } |
             PatternKind::Wild |
             PatternKind::Binding { .. } |
+            PatternKind::AscribeUserType { .. } |
             PatternKind::Leaf { .. } |
             PatternKind::Deref { .. } => {
                 // don't know how to add these patterns to a switch
@@ -149,7 +153,7 @@ impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
     pub fn add_variants_to_switch<'pat>(&mut self,
                                         test_place: &Place<'tcx>,
                                         candidate: &Candidate<'pat, 'tcx>,
-                                        variants: &mut BitArray<usize>)
+                                        variants: &mut BitSet<VariantIdx>)
                                         -> bool
     {
         let match_pair = match candidate.match_pairs.iter().find(|mp| mp.place == *test_place) {
@@ -193,7 +197,7 @@ impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
                 let mut targets = Vec::with_capacity(used_variants + 1);
                 let mut values = Vec::with_capacity(used_variants);
                 let tcx = self.hir.tcx();
-                for (idx, discr) in adt_def.discriminants(tcx).enumerate() {
+                for (idx, discr) in adt_def.discriminants(tcx) {
                     target_blocks.push(if variants.contains(idx) {
                         values.push(discr.val);
                         targets.push(self.cfg.start_new_block());
@@ -227,7 +231,7 @@ impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
             }
 
             TestKind::SwitchInt { switch_ty, ref options, indices: _ } => {
-                let (ret, terminator) = if switch_ty.sty == ty::TyBool {
+                let (ret, terminator) = if switch_ty.sty == ty::Bool {
                     assert!(options.len() > 0 && options.len() <= 2);
                     let (true_bb, false_bb) = (self.cfg.start_new_block(),
                                                self.cfg.start_new_block());
@@ -272,8 +276,8 @@ impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
                     // array, so we can call `<[u8]>::eq` rather than having to find an
                     // `<[u8; N]>::eq`.
                     let unsize = |ty: Ty<'tcx>| match ty.sty {
-                        ty::TyRef(region, rty, _) => match rty.sty {
-                            ty::TyArray(inner_ty, n) => Some((region, inner_ty, n)),
+                        ty::Ref(region, rty, _) => match rty.sty {
+                            ty::Array(inner_ty, n) => Some((region, inner_ty, n)),
                             _ => None,
                         },
                         _ => None,
@@ -321,7 +325,7 @@ impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
                     let ref_ty = self.hir.tcx().mk_ref(region, tam);
 
                     // let lhs_ref_place = &lhs;
-                    let ref_rvalue = Rvalue::Ref(region, BorrowKind::Shared, place.clone());
+                    let ref_rvalue = Rvalue::Ref(region, BorrowKind::Shared, place);
                     let lhs_ref_place = self.temp(ref_ty, test.span);
                     self.cfg.push_assign(block, source_info, &lhs_ref_place, ref_rvalue);
                     let val = Operand::Move(lhs_ref_place);
@@ -344,11 +348,21 @@ impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
                         func: Operand::Constant(box Constant {
                             span: test.span,
                             ty: mty,
-                            literal: method
+
+                            // FIXME(#47184): This constant comes from user
+                            // input (a constant in a pattern).  Are
+                            // there forms where users can add type
+                            // annotations here?  For example, an
+                            // associated constant? Need to
+                            // experiment.
+                            user_ty: None,
+
+                            literal: method,
                         }),
                         args: vec![val, expect],
                         destination: Some((eq_result.clone(), eq_block)),
                         cleanup: Some(cleanup),
+                        from_hir_call: false,
                     });
 
                     // check the result
@@ -499,7 +513,7 @@ impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
                                                         variant_index,
                                                         subpatterns,
                                                         candidate);
-                resulting_candidates[variant_index].push(new_candidate);
+                resulting_candidates[variant_index.as_usize()].push(new_candidate);
                 true
             }
             (&TestKind::Switch { .. }, _) => false,
@@ -629,6 +643,7 @@ impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
             span: candidate.span,
             match_pairs: other_match_pairs,
             bindings: candidate.bindings.clone(),
+            ascriptions: candidate.ascriptions.clone(),
             guard: candidate.guard.clone(),
             arm_index: candidate.arm_index,
             pat_index: candidate.pat_index,
@@ -659,7 +674,7 @@ impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
     fn candidate_after_variant_switch<'pat>(&mut self,
                                             match_pair_index: usize,
                                             adt_def: &'tcx ty::AdtDef,
-                                            variant_index: usize,
+                                            variant_index: VariantIdx,
                                             subpatterns: &'pat [FieldPattern<'tcx>],
                                             candidate: &Candidate<'pat, 'tcx>)
                                             -> Candidate<'pat, 'tcx> {
@@ -693,6 +708,7 @@ impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
             span: candidate.span,
             match_pairs: all_match_pairs,
             bindings: candidate.bindings.clone(),
+            ascriptions: candidate.ascriptions.clone(),
             guard: candidate.guard.clone(),
             arm_index: candidate.arm_index,
             pat_index: candidate.pat_index,

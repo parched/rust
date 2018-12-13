@@ -50,7 +50,7 @@
 #![cfg_attr(windows, feature(libc))]
 // Handle rustfmt skips
 #![feature(custom_attribute)]
-#![cfg_attr(not(stage0), feature(nll))]
+#![feature(nll)]
 #![allow(unused_attributes)]
 
 use std::io::prelude::*;
@@ -198,7 +198,7 @@ pub trait Terminal: Write {
     /// *Note: This does not flush.*
     ///
     /// That means the reset command may get buffered so, if you aren't planning on doing anything
-    /// else that might flush stdout's buffer (e.g. writing a line of text), you should flush after
+    /// else that might flush stdout's buffer (e.g., writing a line of text), you should flush after
     /// calling reset.
     fn reset(&mut self) -> io::Result<bool>;
 

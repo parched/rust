@@ -8,7 +8,7 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-// compile-flags: -Z identify_regions -Z emit-end-regions
+// compile-flags: -Z identify_regions
 
 // Tests to make sure we correctly generate falseUnwind edges in loops
 
@@ -42,6 +42,7 @@ fn main() {
 //    bb5: { // The loop body (body_block)
 //        StorageLive(_5);
 //        _5 = const 1i32;
+//        FakeRead(ForLet, _5);
 //        StorageDead(_5);
 //        goto -> bb4;
 //    }

@@ -19,6 +19,7 @@
 #![feature(box_patterns)]
 #![feature(box_syntax)]
 #![feature(custom_attribute)]
+#![feature(nll)]
 #![allow(unused_attributes)]
 #![feature(quote)]
 #![feature(rustc_diagnostic_macros)]
@@ -32,12 +33,12 @@ extern crate log;
 #[macro_use]
 extern crate rustc;
 extern crate rustc_target;
+extern crate rustc_metadata;
 extern crate rustc_mir;
 extern crate rustc_incremental;
 extern crate syntax;
 extern crate syntax_pos;
 #[macro_use] extern crate rustc_data_structures;
-extern crate rustc_metadata_utils;
 
 use rustc::ty::TyCtxt;
 
@@ -52,12 +53,10 @@ pub mod symbol_names_test;
 /// reporting an error.
 pub fn check_for_rustc_errors_attr(tcx: TyCtxt) {
     if let Some((id, span, _)) = *tcx.sess.entry_fn.borrow() {
-        let main_def_id = tcx.hir.local_def_id(id);
+        let main_def_id = tcx.hir().local_def_id(id);
 
         if tcx.has_attr(main_def_id, "rustc_error") {
             tcx.sess.span_fatal(span, "compilation successful");
         }
     }
 }
-
-__build_diagnostic_array! { librustc_codegen_utils, DIAGNOSTICS }

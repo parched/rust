@@ -10,8 +10,25 @@
  * except according to those terms.
  */
 
-/*jslint browser: true, es5: true */
-/*globals $: true, rootPath: true */
+// From rust:
+/* global ALIASES, currentCrate, rootPath */
+
+// Local js definitions:
+/* global addClass, getCurrentValue, hasClass */
+/* global isHidden onEach, removeClass, updateLocalStorage */
+
+if (!String.prototype.startsWith) {
+    String.prototype.startsWith = function(searchString, position) {
+        position = position || 0;
+        return this.indexOf(searchString, position) === position;
+    };
+}
+if (!String.prototype.endsWith) {
+    String.prototype.endsWith = function(suffix, length) {
+        var l = length || this.length;
+        return this.indexOf(suffix, l - suffix.length) !== -1;
+    };
+}
 
 (function() {
     "use strict";
@@ -39,7 +56,10 @@
                      "associatedconstant",
                      "union",
                      "foreigntype",
-                     "keyword"];
+                     "keyword",
+                     "existential",
+                     "attr",
+                     "derive"];
 
     var search_input = document.getElementsByClassName('search-input')[0];
 
@@ -52,18 +72,7 @@
 
     var themesWidth = null;
 
-    if (!String.prototype.startsWith) {
-        String.prototype.startsWith = function(searchString, position) {
-            position = position || 0;
-            return this.indexOf(searchString, position) === position;
-        };
-    }
-    if (!String.prototype.endsWith) {
-        String.prototype.endsWith = function(suffix, length) {
-            var l = length || this.length;
-            return this.indexOf(suffix, l - suffix.length) !== -1;
-        };
-    }
+    var titleBeforeSearch = document.title;
 
     function getPageId() {
         var id = document.location.href.split('#')[1];
@@ -71,51 +80,6 @@
             return id.split('?')[0].split('&')[0];
         }
         return null;
-    }
-
-    function hasClass(elem, className) {
-        if (elem && className && elem.className) {
-            var elemClass = elem.className;
-            var start = elemClass.indexOf(className);
-            if (start === -1) {
-                return false;
-            } else if (elemClass.length === className.length) {
-                return true;
-            } else {
-                if (start > 0 && elemClass[start - 1] !== ' ') {
-                    return false;
-                }
-                var end = start + className.length;
-                return !(end < elemClass.length && elemClass[end] !== ' ');
-            }
-            if (start > 0 && elemClass[start - 1] !== ' ') {
-                return false;
-            }
-            var end = start + className.length;
-            return !(end < elemClass.length && elemClass[end] !== ' ');
-        }
-        return false;
-    }
-
-    function addClass(elem, className) {
-        if (elem && className && !hasClass(elem, className)) {
-            if (elem.className && elem.className.length > 0) {
-                elem.className += ' ' + className;
-            } else {
-                elem.className = className;
-            }
-        }
-    }
-
-    function removeClass(elem, className) {
-        if (elem && className && elem.className) {
-            elem.className = (" " + elem.className + " ").replace(" " + className + " ", " ")
-                                                         .trim();
-        }
-    }
-
-    function isHidden(elem) {
-        return (elem.offsetParent === null)
     }
 
     function showSidebar() {
@@ -221,6 +185,25 @@
             }
         }
     }
+
+    function expandSection(id) {
+        var elem = document.getElementById(id);
+        if (elem && isHidden(elem)) {
+            var h3 = elem.parentNode.previousSibling;
+            if (h3 && h3.tagName !== 'H3') {
+                h3 = h3.previousSibling; // skip div.docblock
+            }
+
+            if (h3) {
+                var collapses = h3.getElementsByClassName("collapse-toggle");
+                if (collapses.length > 0) {
+                    // The element is not visible, we need to make it appear!
+                    collapseDocs(collapses[0], "show");
+                }
+            }
+        }
+    }
+
     highlightSourceLines(null);
     window.onhashchange = highlightSourceLines;
 
@@ -235,12 +218,14 @@
     //
     // So I guess you could say things are getting pretty interoperable.
     function getVirtualKey(ev) {
-        if ("key" in ev && typeof ev.key != "undefined")
+        if ("key" in ev && typeof ev.key != "undefined") {
             return ev.key;
+        }
 
         var c = ev.charCode || ev.keyCode;
-        if (c == 27)
+        if (c == 27) {
             return "Escape";
+        }
         return String.fromCharCode(c);
     }
 
@@ -267,6 +252,7 @@
             ev.preventDefault();
             addClass(search, "hidden");
             removeClass(document.getElementById("main"), "hidden");
+            document.title = titleBeforeSearch;
         }
         defocusSearchBar();
     }
@@ -314,6 +300,15 @@
         }
     }
 
+    function findParentElement(elem, tagName) {
+        do {
+            if (elem && elem.tagName === tagName) {
+                return elem;
+            }
+        } while (elem = elem.parentNode);
+        return null;
+    }
+
     document.onkeypress = handleShortcut;
     document.onkeydown = handleShortcut;
     document.onclick = function(ev) {
@@ -351,6 +346,13 @@
         } else if (!hasClass(document.getElementById("help"), "hidden")) {
             addClass(document.getElementById("help"), "hidden");
             removeClass(document.body, "blur");
+        } else {
+            // Making a collapsed element visible on onhashchange seems
+            // too late
+            var a = findParentElement(ev.target, 'A');
+            if (a && a.hash) {
+                expandSection(a.hash.replace(/^#/, ''));
+            }
         }
     };
 
@@ -431,12 +433,13 @@
 
         /**
          * Executes the query and builds an index of results
-         * @param  {[Object]} query     [The user query]
-         * @param  {[type]} searchWords [The list of search words to query
-         *                               against]
-         * @return {[type]}             [A search index of results]
+         * @param  {[Object]} query      [The user query]
+         * @param  {[type]} searchWords  [The list of search words to query
+         *                                against]
+         * @param  {[type]} filterCrates [Crate to search in if defined]
+         * @return {[type]}              [A search index of results]
          */
-        function execQuery(query, searchWords) {
+        function execQuery(query, searchWords, filterCrates) {
             function itemTypeFromName(typename) {
                 for (var i = 0; i < itemTypes.length; ++i) {
                     if (itemTypes[i] === typename) {
@@ -741,8 +744,8 @@
                 return literalSearch === true ? false : lev_distance;
             }
 
-            function checkPath(startsWith, lastElem, ty) {
-                if (startsWith.length === 0) {
+            function checkPath(contains, lastElem, ty) {
+                if (contains.length === 0) {
                     return 0;
                 }
                 var ret_lev = MAX_LEV_DISTANCE + 1;
@@ -752,17 +755,17 @@
                     path.push(ty.parent.name.toLowerCase());
                 }
 
-                if (startsWith.length > path.length) {
+                if (contains.length > path.length) {
                     return MAX_LEV_DISTANCE + 1;
                 }
                 for (var i = 0; i < path.length; ++i) {
-                    if (i + startsWith.length > path.length) {
+                    if (i + contains.length > path.length) {
                         break;
                     }
                     var lev_total = 0;
                     var aborted = false;
-                    for (var x = 0; x < startsWith.length; ++x) {
-                        var lev = levenshtein(path[i + x], startsWith[x]);
+                    for (var x = 0; x < contains.length; ++x) {
+                        var lev = levenshtein(path[i + x], contains[x]);
                         if (lev > MAX_LEV_DISTANCE) {
                             aborted = true;
                             break;
@@ -770,7 +773,7 @@
                         lev_total += lev;
                     }
                     if (aborted === false) {
-                        ret_lev = Math.min(ret_lev, Math.round(lev_total / startsWith.length));
+                        ret_lev = Math.min(ret_lev, Math.round(lev_total / contains.length));
                     }
                 }
                 return ret_lev;
@@ -812,6 +815,9 @@
             {
                 val = extractGenerics(val.substr(1, val.length - 2));
                 for (var i = 0; i < nSearchWords; ++i) {
+                    if (filterCrates !== undefined && searchIndex[i].crate !== filterCrates) {
+                        continue;
+                    }
                     var in_args = findArg(searchIndex[i], val, true);
                     var returned = checkReturned(searchIndex[i], val, true);
                     var ty = searchIndex[i];
@@ -866,6 +872,9 @@
                 var output = extractGenerics(parts[1]);
 
                 for (var i = 0; i < nSearchWords; ++i) {
+                    if (filterCrates !== undefined && searchIndex[i].crate !== filterCrates) {
+                        continue;
+                    }
                     var type = searchIndex[i].type;
                     var ty = searchIndex[i];
                     if (!type) {
@@ -934,17 +943,17 @@
                     }
                 }
                 val = paths[paths.length - 1];
-                var startsWith = paths.slice(0, paths.length > 1 ? paths.length - 1 : 1);
+                var contains = paths.slice(0, paths.length > 1 ? paths.length - 1 : 1);
 
                 for (j = 0; j < nSearchWords; ++j) {
-                    var lev_distance;
                     var ty = searchIndex[j];
-                    if (!ty) {
+                    if (!ty || (filterCrates !== undefined && ty.crate !== filterCrates)) {
                         continue;
                     }
+                    var lev_distance;
                     var lev_add = 0;
                     if (paths.length > 1) {
-                        var lev = checkPath(startsWith, paths[paths.length - 1], ty);
+                        var lev = checkPath(contains, paths[paths.length - 1], ty);
                         if (lev > MAX_LEV_DISTANCE) {
                             continue;
                         } else if (lev > 0) {
@@ -987,7 +996,7 @@
                     }
 
                     lev += lev_add;
-                    if (lev > 0 && val.length > 3 && searchWords[j].startsWith(val)) {
+                    if (lev > 0 && val.length > 3 && searchWords[j].indexOf(val) > -1) {
                         if (val.length < 6) {
                             lev -= 1;
                         } else {
@@ -1304,7 +1313,16 @@
                 output = '<div class="search-failed"' + extraStyle + '>No results :(<br/>' +
                     'Try on <a href="https://duckduckgo.com/?q=' +
                     encodeURIComponent('rust ' + query.query) +
-                    '">DuckDuckGo</a>?</div>';
+                    '">DuckDuckGo</a>?<br/><br/>' +
+                    'Or try looking in one of these:<ul><li>The <a ' +
+                    'href="https://doc.rust-lang.org/reference/index.html">Rust Reference</a> for' +
+                    ' technical details about the language.</li><li><a ' +
+                    'href="https://doc.rust-lang.org/rust-by-example/index.html">Rust By Example' +
+                    '</a> for expository code examples.</a></li><li>The <a ' +
+                    'href="https://doc.rust-lang.org/book/index.html">Rust Book</a> for ' +
+                    'introductions to language features and the language itself.</li><li><a ' +
+                    'href="https://docs.rs">Docs.rs</a> for documentation of crates released on ' +
+                    '<a href="https://crates.io/">crates.io</a>.</li></ul></div>';
             }
             return [output, length];
         }
@@ -1317,7 +1335,7 @@
             return '<div>' + text + ' <div class="count">(' + nbElems + ')</div></div>';
         }
 
-        function showResults(results) {
+        function showResults(results, filterCrates) {
             if (results['others'].length === 1 &&
                 getCurrentValue('rustdoc-go-to-only-result') === "true") {
                 var elem = document.createElement('a');
@@ -1335,8 +1353,13 @@
             var ret_in_args = addTab(results['in_args'], query, false);
             var ret_returned = addTab(results['returned'], query, false);
 
+            var filter = "";
+            if (filterCrates !== undefined) {
+                filter = " (in <b>" + filterCrates + "</b> crate)";
+            }
+
             var output = '<h1>Results for ' + escape(query.query) +
-                (query.type ? ' (type: ' + escape(query.type) + ')' : '') + '</h1>' +
+                (query.type ? ' (type: ' + escape(query.type) + ')' : '') + filter + '</h1>' +
                 '<div id="titles">' +
                 makeTabHeader(0, "In Names", ret_others[1]) +
                 makeTabHeader(1, "In Parameters", ret_in_args[1]) +
@@ -1365,7 +1388,7 @@
             printTab(currentTab);
         }
 
-        function execSearch(query, searchWords) {
+        function execSearch(query, searchWords, filterCrates) {
             var queries = query.raw.split(",");
             var results = {
                 'in_args': [],
@@ -1376,7 +1399,7 @@
             for (var i = 0; i < queries.length; ++i) {
                 var query = queries[i].trim();
                 if (query.length !== 0) {
-                    var tmp = execQuery(getQuery(query), searchWords);
+                    var tmp = execQuery(getQuery(query), searchWords, filterCrates);
 
                     results['in_args'].push(tmp['in_args']);
                     results['returned'].push(tmp['returned']);
@@ -1438,7 +1461,16 @@
             }
         }
 
-        function search(e) {
+        function getFilterCrates() {
+            var elem = document.getElementById("crate-search");
+
+            if (elem && elem.value !== "All crates" && rawSearchIndex.hasOwnProperty(elem.value)) {
+                return elem.value;
+            }
+            return undefined;
+        }
+
+        function search(e, forced) {
             var params = getQueryStringParams();
             var query = getQuery(search_input.value.trim());
 
@@ -1446,7 +1478,10 @@
                 e.preventDefault();
             }
 
-            if (query.query.length === 0 || query.id === currentResults) {
+            if (query.query.length === 0) {
+                return;
+            }
+            if (forced !== true && query.id === currentResults) {
                 if (query.query.length > 0) {
                     putBackSearch(search_input);
                 }
@@ -1466,7 +1501,8 @@
                 }
             }
 
-            showResults(execSearch(query, index));
+            var filterCrates = getFilterCrates();
+            showResults(execSearch(query, index, filterCrates), filterCrates);
         }
 
         function buildIndex(rawSearchIndex) {
@@ -1565,6 +1601,13 @@
                 setTimeout(search, 0);
             };
             search_input.onpaste = search_input.onchange;
+
+            var selectCrate = document.getElementById('crate-search');
+            if (selectCrate) {
+                selectCrate.onchange = function() {
+                    search(undefined, true);
+                };
+            }
 
             // Push and pop states are used to add search results to the browser
             // history.
@@ -1753,9 +1796,12 @@
                         x[k].setAttribute('href', rootPath + href);
                     }
                 }
-                var li = document.createElement('li');
-                li.appendChild(code);
-                list.appendChild(li);
+                var display = document.createElement('h3');
+                addClass(display, "impl");
+                display.innerHTML = '<span class="in-band"><table class="table-display"><tbody>\
+                    <tr><td><code>' + code.outerHTML + '</code></td><td></td></tr></tbody></table>\
+                    </span>';
+                list.appendChild(display);
             }
         }
     };
@@ -1842,7 +1888,7 @@
             if (hasClass(relatedDoc, "stability")) {
                 relatedDoc = relatedDoc.nextElementSibling;
             }
-            if (hasClass(relatedDoc, "docblock")) {
+            if (hasClass(relatedDoc, "docblock") || hasClass(relatedDoc, "sub-variant")) {
                 var action = mode;
                 if (action === "toggle") {
                     if (hasClass(relatedDoc, "hidden-by-usual-hider")) {
@@ -1938,18 +1984,32 @@
         if (collapse) {
             toggleAllDocs(pageId, true);
         }
-        if (getCurrentValue('rustdoc-trait-implementations') !== "false") {
-            onEach(document.getElementsByClassName("collapse-toggle"), function(e) {
+        var collapser = function(e) {
                 // inherent impl ids are like 'impl' or impl-<number>'.
                 // they will never be hidden by default.
-                var n = e.parentNode;
+                var n = e.parentElement;
                 if (n.id.match(/^impl(?:-\d+)?$/) === null) {
                     // Automatically minimize all non-inherent impls
                     if (collapse || hasClass(n, 'impl')) {
                         collapseDocs(e, "hide", pageId);
                     }
                 }
-            });
+        };
+        if (getCurrentValue('rustdoc-trait-implementations') !== "false") {
+            var impl_list = document.getElementById('implementations-list');
+
+            if (impl_list !== null) {
+                onEach(impl_list.getElementsByClassName("collapse-toggle"), collapser);
+            }
+        }
+        if (getCurrentValue('rustdoc-method-docs') !== "false") {
+            var implItems = document.getElementsByClassName('impl-items');
+
+            if (implItems && implItems.length > 0) {
+                onEach(implItems, function(elem) {
+                    onEach(elem.getElementsByClassName("collapse-toggle"), collapser);
+                });
+            }
         }
     }
 
@@ -1987,7 +2047,8 @@
         if (!next) {
             return;
         }
-        if ((checkIfThereAreMethods(next.childNodes) || hasClass(e, 'method')) &&
+        if ((hasClass(e, 'method') || hasClass(e, 'associatedconstant') ||
+             checkIfThereAreMethods(next.childNodes)) &&
             (hasClass(next, 'docblock') ||
              hasClass(e, 'impl') ||
              (hasClass(next, 'stability') &&
@@ -1996,15 +2057,59 @@
         }
     };
     onEach(document.getElementsByClassName('method'), func);
+    onEach(document.getElementsByClassName('associatedconstant'), func);
     onEach(document.getElementsByClassName('impl'), func);
     onEach(document.getElementsByClassName('impl-items'), function(e) {
         onEach(e.getElementsByClassName('associatedconstant'), func);
+        var hiddenElems = e.getElementsByClassName('hidden');
+        var needToggle = false;
+
+        for (var i = 0; i < hiddenElems.length; ++i) {
+            if (hasClass(hiddenElems[i], "content") === false &&
+                hasClass(hiddenElems[i], "docblock") === false) {
+                needToggle = true;
+                break;
+            }
+        }
+        if (needToggle === true) {
+            var newToggle = document.createElement('a');
+            newToggle.href = 'javascript:void(0)';
+            newToggle.className = 'collapse-toggle hidden-default collapsed';
+            newToggle.innerHTML = "[<span class='inner'>" + labelForToggleButton(true) + "</span>" +
+                                  "] Show hidden undocumented items";
+            newToggle.onclick = function() {
+                if (hasClass(this, "collapsed")) {
+                    removeClass(this, "collapsed");
+                    onEach(this.parentNode.getElementsByClassName("hidden"), function(x) {
+                        if (hasClass(x, "content") === false) {
+                            removeClass(x, "hidden");
+                            addClass(x, "x");
+                        }
+                    }, true);
+                    this.innerHTML = "[<span class='inner'>" + labelForToggleButton(false) +
+                                     "</span>] Hide undocumented items"
+                } else {
+                    addClass(this, "collapsed");
+                    onEach(this.parentNode.getElementsByClassName("x"), function(x) {
+                        if (hasClass(x, "content") === false) {
+                            addClass(x, "hidden");
+                            removeClass(x, "x");
+                        }
+                    }, true);
+                    this.innerHTML = "[<span class='inner'>" + labelForToggleButton(true) +
+                                     "</span>] Show hidden undocumented items";
+                }
+            };
+            e.insertBefore(newToggle, e.firstChild);
+        }
     });
 
-    function createToggle(otherMessage, fontSize, extraClass) {
+    function createToggle(otherMessage, fontSize, extraClass, show) {
         var span = document.createElement('span');
         span.className = 'toggle-label';
-        span.style.display = 'none';
+        if (show) {
+            span.style.display = 'none';
+        }
         if (!otherMessage) {
             span.innerHTML = '&nbsp;Expand&nbsp;description';
         } else {
@@ -2020,22 +2125,28 @@
 
         var wrapper = document.createElement('div');
         wrapper.className = 'toggle-wrapper';
+        if (!show) {
+            addClass(wrapper, 'collapsed');
+            var inner = mainToggle.getElementsByClassName('inner');
+            if (inner && inner.length > 0) {
+                inner[0].innerHTML = '+';
+            }
+        }
         if (extraClass) {
-            wrapper.className += ' ' + extraClass;
+            addClass(wrapper, extraClass);
         }
         wrapper.appendChild(mainToggle);
         return wrapper;
     }
 
-    onEach(document.getElementsByClassName('docblock'), function(e) {
+    var showItemDeclarations = getCurrentValue('rustdoc-item-declarations') === "false";
+    function buildToggleWrapper(e) {
         if (hasClass(e, 'autohide')) {
             var wrap = e.previousElementSibling;
             if (wrap && hasClass(wrap, 'toggle-wrapper')) {
                 var toggle = wrap.childNodes[0];
-                var extra = false;
-                if (e.childNodes[0].tagName === 'H3') {
-                    extra = true;
-                }
+                var extra = e.childNodes[0].tagName === 'H3';
+
                 e.style.display = 'none';
                 addClass(wrap, 'collapsed');
                 onEach(toggle.getElementsByClassName('inner'), function(e) {
@@ -2050,13 +2161,18 @@
             }
         }
         if (e.parentNode.id === "main") {
-            var otherMessage;
+            var otherMessage = '';
             var fontSize;
             var extraClass;
 
             if (hasClass(e, "type-decl")) {
                 fontSize = "20px";
                 otherMessage = '&nbsp;Show&nbsp;declaration';
+                if (showItemDeclarations === false) {
+                    extraClass = 'collapsed';
+                }
+            } else if (hasClass(e, "sub-variant")) {
+                otherMessage = '&nbsp;Show&nbsp;fields';
             } else if (hasClass(e, "non-exhaustive")) {
                 otherMessage = '&nbsp;This&nbsp;';
                 if (hasClass(e, "non-exhaustive-struct")) {
@@ -2071,12 +2187,20 @@
                 extraClass = "marg-left";
             }
 
-            e.parentNode.insertBefore(createToggle(otherMessage, fontSize, extraClass), e);
-            if (otherMessage && getCurrentValue('rustdoc-item-declarations') !== "false") {
+            e.parentNode.insertBefore(
+                createToggle(otherMessage,
+                             fontSize,
+                             extraClass,
+                             hasClass(e, "type-decl") === false || showItemDeclarations === true),
+                e);
+            if (hasClass(e, "type-decl") === true && showItemDeclarations === true) {
                 collapseDocs(e.previousSibling.childNodes[0], "toggle");
             }
         }
-    });
+    }
+
+    onEach(document.getElementsByClassName('docblock'), buildToggleWrapper);
+    onEach(document.getElementsByClassName('sub-variant'), buildToggleWrapper);
 
     function createToggleWrapper(tog) {
         var span = document.createElement('span');
@@ -2115,29 +2239,50 @@
         });
     }
 
+    // To avoid checking on "rustdoc-item-attributes" value on every loop...
+    var itemAttributesFunc = function() {};
+    if (getCurrentValue("rustdoc-item-attributes") !== "false") {
+        itemAttributesFunc = function(x) {
+            collapseDocs(x.previousSibling.childNodes[0], "toggle");
+        };
+    }
     onEach(document.getElementById('main').getElementsByClassName('attributes'), function(i_e) {
         i_e.parentNode.insertBefore(createToggleWrapper(toggle.cloneNode(true)), i_e);
-        if (getCurrentValue("rustdoc-item-attributes") !== "false") {
-            collapseDocs(i_e.previousSibling.childNodes[0], "toggle");
-        }
+        itemAttributesFunc(i_e);
     });
 
+    // To avoid checking on "rustdoc-line-numbers" value on every loop...
+    var lineNumbersFunc = function() {};
+    if (getCurrentValue("rustdoc-line-numbers") === "true") {
+        lineNumbersFunc = function(x) {
+            var count = x.textContent.split('\n').length;
+            var elems = [];
+            for (var i = 0; i < count; ++i) {
+                elems.push(i + 1);
+            }
+            var node = document.createElement('pre');
+            addClass(node, 'line-number');
+            node.innerHTML = elems.join('\n');
+            x.parentNode.insertBefore(node, x);
+        };
+    }
     onEach(document.getElementsByClassName('rust-example-rendered'), function(e) {
         if (hasClass(e, 'compile_fail')) {
             e.addEventListener("mouseover", function(event) {
-                e.previousElementSibling.childNodes[0].style.color = '#f00';
+                this.parentElement.previousElementSibling.childNodes[0].style.color = '#f00';
             });
             e.addEventListener("mouseout", function(event) {
-                e.previousElementSibling.childNodes[0].style.color = '';
+                this.parentElement.previousElementSibling.childNodes[0].style.color = '';
             });
         } else if (hasClass(e, 'ignore')) {
             e.addEventListener("mouseover", function(event) {
-                e.previousElementSibling.childNodes[0].style.color = '#ff9200';
+                this.parentElement.previousElementSibling.childNodes[0].style.color = '#ff9200';
             });
             e.addEventListener("mouseout", function(event) {
-                e.previousElementSibling.childNodes[0].style.color = '';
+                this.parentElement.previousElementSibling.childNodes[0].style.color = '';
             });
         }
+        lineNumbersFunc(e);
     });
 
     function showModal(content) {
@@ -2210,23 +2355,41 @@
     autoCollapse(getPageId(), getCurrentValue("rustdoc-collapse") === "true");
 
     if (window.location.hash && window.location.hash.length > 0) {
-        var hash = getPageId();
-        if (hash !== null) {
-            var elem = document.getElementById(hash);
-            if (elem && elem.offsetParent === null) {
-                console.log(elem, elem.parentNode);
-                if (elem.parentNode && elem.parentNode.previousSibling) {
-                    var collapses = elem.parentNode
-                                        .previousSibling
-                                        .getElementsByClassName("collapse-toggle");
-                    if (collapses.length > 0) {
-                        // The element is not visible, we need to make it appear!
-                        collapseDocs(collapses[0], "show");
-                    }
-                }
+        expandSection(window.location.hash.replace(/^#/, ''));
+    }
+
+    function addSearchOptions(crates) {
+        var elem = document.getElementById('crate-search');
+
+        if (!elem) {
+            return;
+        }
+        var crates_text = [];
+        for (var crate in crates) {
+            if (crates.hasOwnProperty(crate)) {
+                crates_text.push(crate);
             }
         }
+        crates_text.sort(function(a, b) {
+            var lower_a = a.toLowerCase();
+            var lower_b = b.toLowerCase();
+
+            if (lower_a < lower_b) {
+                return -1;
+            } else if (lower_a > lower_b) {
+                return 1;
+            }
+            return 0;
+        });
+        for (var i = 0; i < crates_text.length; ++i) {
+            var option = document.createElement("option");
+            option.value = crates_text[i];
+            option.innerText = crates_text[i];
+            elem.appendChild(option);
+        }
     }
+
+    window.addSearchOptions = addSearchOptions;
 }());
 
 // Sets the focus on the search bar at the top of the page

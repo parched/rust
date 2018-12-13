@@ -11,8 +11,7 @@
 use std::env;
 use std::process::Command;
 use std::path::{Path, PathBuf};
-use std::fs::File;
-use std::io::Write;
+use std::fs;
 
 struct Test {
     repo: &'static str,
@@ -33,7 +32,7 @@ const TEST_REPOS: &'static [Test] = &[
     Test {
         name: "ripgrep",
         repo: "https://github.com/BurntSushi/ripgrep",
-        sha: "b65bb37b14655e1a89c7cd19c8b011ef3e312791",
+        sha: "ad9befbc1d3b5c695e7f6b6734ee1b8e683edd41",
         lock: None,
         packages: &[],
     },
@@ -61,11 +60,11 @@ const TEST_REPOS: &'static [Test] = &[
     Test {
         name: "servo",
         repo: "https://github.com/servo/servo",
-        sha: "17e97b9320fdb7cdb33bbc5f4d0fde0653bbf2e4",
+        sha: "987e376ca7a4245dbc3e0c06e963278ee1ac92d1",
         lock: None,
         // Only test Stylo a.k.a. Quantum CSS, the parts of Servo going into Firefox.
         // This takes much less time to build than all of Servo and supports stable Rust.
-        packages: &["stylo_tests", "selectors"],
+        packages: &["selectors"],
     },
     Test {
         name: "webrender",
@@ -91,10 +90,7 @@ fn test_repo(cargo: &Path, out_dir: &Path, test: &Test) {
     println!("testing {}", test.repo);
     let dir = clone_repo(test, out_dir);
     if let Some(lockfile) = test.lock {
-        File::create(&dir.join("Cargo.lock"))
-            .expect("")
-            .write_all(lockfile.as_bytes())
-            .expect("");
+        fs::write(&dir.join("Cargo.lock"), lockfile).unwrap();
     }
     if !run_cargo_test(cargo, &dir, test.packages) {
         panic!("tests failed for {}", test.repo);

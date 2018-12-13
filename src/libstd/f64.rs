@@ -176,6 +176,35 @@ impl f64 {
         }
     }
 
+    /// Returns a number composed of the magnitude of `self` and the sign of
+    /// `y`.
+    ///
+    /// Equal to `self` if the sign of `self` and `y` are the same, otherwise
+    /// equal to `-self`. If `self` is a `NAN`, then a `NAN` with the sign of
+    /// `y` is returned.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// #![feature(copysign)]
+    /// use std::f64;
+    ///
+    /// let f = 3.5_f64;
+    ///
+    /// assert_eq!(f.copysign(0.42), 3.5_f64);
+    /// assert_eq!(f.copysign(-0.42), -3.5_f64);
+    /// assert_eq!((-f).copysign(0.42), 3.5_f64);
+    /// assert_eq!((-f).copysign(-0.42), -3.5_f64);
+    ///
+    /// assert!(f64::NAN.copysign(1.0).is_nan());
+    /// ```
+    #[inline]
+    #[must_use]
+    #[unstable(feature="copysign", issue="55169")]
+    pub fn copysign(self, y: f64) -> f64 {
+        unsafe { intrinsics::copysignf64(self, y) }
+    }
+
     /// Fused multiply-add. Computes `(self * a) + b` with only one rounding
     /// error, yielding a more accurate result than an unfused multiply-add.
     ///
@@ -859,7 +888,7 @@ impl f64 {
     }
 
     // Solaris/Illumos requires a wrapper around log, log2, and log10 functions
-    // because of their non-standard behavior (e.g. log(-n) returns -Inf instead
+    // because of their non-standard behavior (e.g., log(-n) returns -Inf instead
     // of expected NaN).
     fn log_wrapper<F: Fn(f64) -> f64>(self, log_fn: F) -> f64 {
         if !cfg!(target_os = "solaris") {

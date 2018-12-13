@@ -27,7 +27,7 @@
 //! should have some resemblance to multiplication (and share expected
 //! properties like associativity).
 //!
-//! Note that the `&&` and `||` operators short-circuit, i.e. they only
+//! Note that the `&&` and `||` operators short-circuit, i.e., they only
 //! evaluate their second operand if it contributes to the result. Since this
 //! behavior is not enforceable by traits, `&&` and `||` are not supported as
 //! overloadable operators.
@@ -201,3 +201,6 @@ pub use self::generator::{Generator, GeneratorState};
 
 #[unstable(feature = "coerce_unsized", issue = "27732")]
 pub use self::unsize::CoerceUnsized;
+
+#[unstable(feature = "dispatch_from_dyn", issue = "0")]
+pub use self::unsize::DispatchFromDyn;

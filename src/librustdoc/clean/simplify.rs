@@ -12,7 +12,7 @@
 //! more canonical form.
 //!
 //! Currently all cross-crate-inlined function use `rustc::ty` to reconstruct
-//! the AST (e.g. see all of `clean::inline`), but this is not always a
+//! the AST (e.g., see all of `clean::inline`), but this is not always a
 //! non-lossy transformation. The current format of storage for where clauses
 //! for functions and such is simply a list of predicates. One example of this
 //! is that the AST predicate of: `where T: Trait<Foo=Bar>` is encoded as:
@@ -34,7 +34,7 @@ use core::DocContext;
 
 pub fn where_clauses(cx: &DocContext, clauses: Vec<WP>) -> Vec<WP> {
     // First, partition the where clause into its separate components
-    let mut params = BTreeMap::new();
+    let mut params: BTreeMap<_, Vec<_>> = BTreeMap::new();
     let mut lifetimes = Vec::new();
     let mut equalities = Vec::new();
     let mut tybounds = Vec::new();
@@ -43,7 +43,7 @@ pub fn where_clauses(cx: &DocContext, clauses: Vec<WP>) -> Vec<WP> {
         match clause {
             WP::BoundPredicate { ty, bounds } => {
                 match ty {
-                    clean::Generic(s) => params.entry(s).or_insert(Vec::new())
+                    clean::Generic(s) => params.entry(s).or_default()
                                                .extend(bounds),
                     t => tybounds.push((t, ty_bounds(bounds))),
                 }
@@ -156,8 +156,8 @@ fn trait_is_same_or_supertrait(cx: &DocContext, child: DefId,
     if child == trait_ {
         return true
     }
-    let predicates = cx.tcx.super_predicates_of(child).predicates;
-    predicates.iter().filter_map(|pred| {
+    let predicates = cx.tcx.super_predicates_of(child);
+    predicates.predicates.iter().filter_map(|(pred, _)| {
         if let ty::Predicate::Trait(ref pred) = *pred {
             if pred.skip_binder().trait_ref.self_ty().is_self() {
                 Some(pred.def_id())

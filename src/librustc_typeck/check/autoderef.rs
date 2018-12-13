@@ -59,15 +59,15 @@ impl<'a, 'gcx, 'tcx> Iterator for Autoderef<'a, 'gcx, 'tcx> {
         if self.steps.len() >= *tcx.sess.recursion_limit.get() {
             // We've reached the recursion limit, error gracefully.
             let suggested_limit = *tcx.sess.recursion_limit.get() * 2;
-            let msg = format!("reached the recursion limit while auto-dereferencing {:?}",
+            let msg = format!("reached the recursion limit while auto-dereferencing `{:?}`",
                               self.cur_ty);
-            let error_id = (DiagnosticMessageId::ErrorId(55), Some(self.span), msg.clone());
+            let error_id = (DiagnosticMessageId::ErrorId(55), Some(self.span), msg);
             let fresh = tcx.sess.one_time_diagnostics.borrow_mut().insert(error_id);
             if fresh {
                 struct_span_err!(tcx.sess,
                                  self.span,
                                  E0055,
-                                 "reached the recursion limit while auto-dereferencing {:?}",
+                                 "reached the recursion limit while auto-dereferencing `{:?}`",
                                  self.cur_ty)
                     .span_label(self.span, "deref recursion limit reached")
                     .help(&format!(
@@ -177,7 +177,7 @@ impl<'a, 'gcx, 'tcx> Autoderef<'a, 'gcx, 'tcx> {
                 self.fcx.try_overloaded_deref(self.span, source, needs)
                     .and_then(|InferOk { value: method, obligations: o }| {
                         obligations.extend(o);
-                        if let ty::TyRef(region, _, mutbl) = method.sig.output().sty {
+                        if let ty::Ref(region, _, mutbl) = method.sig.output().sty {
                             Some(OverloadedDeref {
                                 region,
                                 mutbl,
@@ -203,7 +203,7 @@ impl<'a, 'gcx, 'tcx> Autoderef<'a, 'gcx, 'tcx> {
     }
 
     /// also dereference through raw pointer types
-    /// e.g. assuming ptr_to_Foo is the type `*const Foo`
+    /// e.g., assuming ptr_to_Foo is the type `*const Foo`
     /// fcx.autoderef(span, ptr_to_Foo)  => [*const Foo]
     /// fcx.autoderef(span, ptr_to_Foo).include_raw_ptrs() => [*const Foo, Foo]
     pub fn include_raw_pointers(mut self) -> Self {

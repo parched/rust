@@ -18,7 +18,7 @@ use syntax::ast;
 use syntax::ast::{Expr, GenericParamKind, Generics, Ident, SelfKind, GenericArg};
 use syntax::ext::base::ExtCtxt;
 use syntax::ext::build::AstBuilder;
-use syntax::codemap::{respan, DUMMY_SP};
+use syntax::source_map::{respan, DUMMY_SP};
 use syntax::ptr::P;
 use syntax_pos::Span;
 use syntax_pos::symbol::keywords;
@@ -32,7 +32,7 @@ pub enum PtrTy<'a> {
     Raw(ast::Mutability),
 }
 
-/// A path, e.g. `::std::option::Option::<i32>` (global). Has support
+/// A path, e.g., `::std::option::Option::<i32>` (global). Has support
 /// for type parameters and a lifetime.
 #[derive(Clone)]
 pub struct Path<'a> {

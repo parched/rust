@@ -8,10 +8,11 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+#![allow(unused_imports)]
 // ignore-cloudabi can't run commands
 // ignore-emscripten can't run commands
 
-#![feature(libc)]
+#![feature(rustc_private)]
 
 extern crate libc;
 

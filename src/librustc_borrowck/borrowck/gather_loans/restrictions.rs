@@ -70,6 +70,12 @@ impl<'a, 'tcx> RestrictionsContext<'a, 'tcx> {
                 RestrictionResult::Safe
             }
 
+            Categorization::ThreadLocal(..) => {
+                // Thread-locals are statics that have a scope, with
+                // no underlying structure to provide restrictions.
+                RestrictionResult::Safe
+            }
+
             Categorization::Local(local_id) => {
                 // R-Variable, locally declared
                 let lp = new_lp(LpVar(local_id));
@@ -104,7 +110,7 @@ impl<'a, 'tcx> RestrictionsContext<'a, 'tcx> {
                 let result = self.restrict(&cmt_base);
                 // Borrowing one union field automatically borrows all its fields.
                 match base_ty.sty {
-                    ty::TyAdt(adt_def, _) if adt_def.is_union() => match result {
+                    ty::Adt(adt_def, _) if adt_def.is_union() => match result {
                         RestrictionResult::Safe => RestrictionResult::Safe,
                         RestrictionResult::SafeIf(base_lp, mut base_vec) => {
                             for (i, field) in adt_def.non_enum_variant().fields.iter().enumerate() {

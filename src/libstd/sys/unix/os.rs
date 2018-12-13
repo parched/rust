@@ -27,15 +27,12 @@ use path::{self, PathBuf};
 use ptr;
 use slice;
 use str;
-use sys_common::mutex::Mutex;
+use sys_common::mutex::{Mutex, MutexGuard};
 use sys::cvt;
 use sys::fd;
 use vec;
 
 const TMPBUF_SZ: usize = 128;
-// We never call `ENV_LOCK.init()`, so it is UB to attempt to
-// acquire this mutex reentrantly!
-static ENV_LOCK: Mutex = Mutex::new();
 
 
 extern {
@@ -286,11 +283,14 @@ pub fn current_exe() -> io::Result<PathBuf> {
 
 #[cfg(any(target_os = "linux", target_os = "android", target_os = "emscripten"))]
 pub fn current_exe() -> io::Result<PathBuf> {
-    let selfexe = PathBuf::from("/proc/self/exe");
-    if selfexe.exists() {
-        ::fs::read_link(selfexe)
-    } else {
-        Err(io::Error::new(io::ErrorKind::Other, "no /proc/self/exe available. Is /proc mounted?"))
+    match ::fs::read_link("/proc/self/exe") {
+        Err(ref e) if e.kind() == io::ErrorKind::NotFound => {
+            Err(io::Error::new(
+                io::ErrorKind::Other,
+                "no /proc/self/exe available. Is /proc mounted?"
+            ))
+        },
+        other => other,
     }
 }
 
@@ -408,18 +408,21 @@ pub unsafe fn environ() -> *mut *const *const c_char {
     &mut environ
 }
 
+pub unsafe fn env_lock() -> MutexGuard<'static> {
+    // We never call `ENV_LOCK.init()`, so it is UB to attempt to
+    // acquire this mutex reentrantly!
+    static ENV_LOCK: Mutex = Mutex::new();
+    ENV_LOCK.lock()
+}
+
 /// Returns a vector of (variable, value) byte-vector pairs for all the
 /// environment variables of the current process.
 pub fn env() -> Env {
     unsafe {
-        let _guard = ENV_LOCK.lock();
+        let _guard = env_lock();
         let mut environ = *environ();
-        if environ == ptr::null() {
-            panic!("os::env() failure getting env string from OS: {}",
-                   io::Error::last_os_error());
-        }
         let mut result = Vec::new();
-        while *environ != ptr::null() {
+        while environ != ptr::null() && *environ != ptr::null() {
             if let Some(key_value) = parse(CStr::from_ptr(*environ).to_bytes()) {
                 result.push(key_value);
             }
@@ -452,7 +455,7 @@ pub fn getenv(k: &OsStr) -> io::Result<Option<OsString>> {
     // always None as well
     let k = CString::new(k.as_bytes())?;
     unsafe {
-        let _guard = ENV_LOCK.lock();
+        let _guard = env_lock();
         let s = libc::getenv(k.as_ptr()) as *const libc::c_char;
         let ret = if s.is_null() {
             None
@@ -468,7 +471,7 @@ pub fn setenv(k: &OsStr, v: &OsStr) -> io::Result<()> {
     let v = CString::new(v.as_bytes())?;
 
     unsafe {
-        let _guard = ENV_LOCK.lock();
+        let _guard = env_lock();
         cvt(libc::setenv(k.as_ptr(), v.as_ptr(), 1)).map(|_| ())
     }
 }
@@ -477,7 +480,7 @@ pub fn unsetenv(n: &OsStr) -> io::Result<()> {
     let nbuf = CString::new(n.as_bytes())?;
 
     unsafe {
-        let _guard = ENV_LOCK.lock();
+        let _guard = env_lock();
         cvt(libc::unsetenv(nbuf.as_ptr())).map(|_| ())
     }
 }
@@ -571,5 +574,32 @@ fn parse_glibc_version(version: &str) -> Option<(usize, usize)> {
     match (parsed_ints.next(), parsed_ints.next()) {
         (Some(Ok(major)), Some(Ok(minor))) => Some((major, minor)),
         _ => None
+    }
+}
+
+#[cfg(all(test, target_env = "gnu"))]
+mod test {
+    use super::*;
+
+    #[test]
+    fn test_glibc_version() {
+        // This mostly just tests that the weak linkage doesn't panic wildly...
+        glibc_version();
+    }
+
+    #[test]
+    fn test_parse_glibc_version() {
+        let cases = [
+            ("0.0", Some((0, 0))),
+            ("01.+2", Some((1, 2))),
+            ("3.4.5.six", Some((3, 4))),
+            ("1", None),
+            ("1.-2", None),
+            ("1.foo", None),
+            ("foo.1", None),
+        ];
+        for &(version_str, parsed) in cases.iter() {
+            assert_eq!(parsed, parse_glibc_version(version_str));
+        }
     }
 }

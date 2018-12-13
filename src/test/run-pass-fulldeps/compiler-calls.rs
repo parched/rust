@@ -11,6 +11,7 @@
 // Test that the CompilerCalls interface to the compiler works.
 
 // ignore-cross-compile
+// ignore-stage1
 
 #![feature(rustc_private)]
 
@@ -92,7 +93,9 @@ fn main() {
         let tc = TestCalls { count: &mut count };
         // we should never get use this filename, but lets make sure they are valid args.
         let args = vec!["compiler-calls".to_string(), "foo.rs".to_string()];
-        rustc_driver::run_compiler(&args, Box::new(tc), None, None);
+        syntax::with_globals(|| {
+            rustc_driver::run_compiler(&args, Box::new(tc), None, None);
+        });
     }
     assert_eq!(count, 30);
 }

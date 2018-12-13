@@ -24,7 +24,7 @@ use std::rc::Rc;
 use syntax::ast;
 use syntax_pos::Span;
 use rustc::hir::*;
-use rustc::hir::map::Node::*;
+use rustc::hir::Node;
 
 struct GatherMoveInfo<'c, 'tcx: 'c> {
     id: hir::ItemLocalId,
@@ -57,10 +57,10 @@ pub enum PatternSource<'tcx> {
 /// with a reference to the let
 fn get_pattern_source<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>, pat: &Pat) -> PatternSource<'tcx> {
 
-    let parent = tcx.hir.get_parent_node(pat.id);
+    let parent = tcx.hir().get_parent_node(pat.id);
 
-    match tcx.hir.get(parent) {
-        NodeExpr(ref e) => {
+    match tcx.hir().get(parent) {
+        Node::Expr(ref e) => {
             // the enclosing expression must be a `match` or something else
             assert!(match e.node {
                         ExprKind::Match(..) => true,
@@ -68,7 +68,7 @@ fn get_pattern_source<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>, pat: &Pat) -> Patte
                     });
             PatternSource::MatchExpr(e)
         }
-        NodeLocal(local) => PatternSource::LetDecl(local),
+        Node::Local(local) => PatternSource::LetDecl(local),
         _ => return PatternSource::Other,
 
     }
@@ -79,7 +79,7 @@ pub fn gather_decl<'a, 'tcx>(bccx: &BorrowckCtxt<'a, 'tcx>,
                              var_id: ast::NodeId,
                              var_ty: Ty<'tcx>) {
     let loan_path = Rc::new(LoanPath::new(LpVar(var_id), var_ty));
-    let hir_id = bccx.tcx.hir.node_to_hir_id(var_id);
+    let hir_id = bccx.tcx.hir().node_to_hir_id(var_id);
     move_data.add_move(bccx.tcx, loan_path, hir_id.local_id, Declared);
 }
 
@@ -163,15 +163,11 @@ pub fn gather_assignment<'a, 'tcx>(bccx: &BorrowckCtxt<'a, 'tcx>,
                                    move_data: &MoveData<'tcx>,
                                    assignment_id: hir::ItemLocalId,
                                    assignment_span: Span,
-                                   assignee_loan_path: Rc<LoanPath<'tcx>>,
-                                   assignee_id: hir::ItemLocalId,
-                                   mode: euv::MutateMode) {
+                                   assignee_loan_path: Rc<LoanPath<'tcx>>) {
     move_data.add_assignment(bccx.tcx,
                              assignee_loan_path,
                              assignment_id,
-                             assignment_span,
-                             assignee_id,
-                             mode);
+                             assignment_span);
 }
 
 // (keep in sync with move_error::report_cannot_move_out_of )
@@ -181,6 +177,7 @@ fn check_and_get_illegal_move_origin<'a, 'tcx>(bccx: &BorrowckCtxt<'a, 'tcx>,
     match cmt.cat {
         Categorization::Deref(_, mc::BorrowedPtr(..)) |
         Categorization::Deref(_, mc::UnsafePtr(..)) |
+        Categorization::ThreadLocal(..) |
         Categorization::StaticItem => {
             Some(cmt.clone())
         }
@@ -195,14 +192,14 @@ fn check_and_get_illegal_move_origin<'a, 'tcx>(bccx: &BorrowckCtxt<'a, 'tcx>,
         Categorization::Interior(ref b, mc::InteriorField(_)) |
         Categorization::Interior(ref b, mc::InteriorElement(Kind::Pattern)) => {
             match b.ty.sty {
-                ty::TyAdt(def, _) => {
+                ty::Adt(def, _) => {
                     if def.has_dtor(bccx.tcx) {
                         Some(cmt.clone())
                     } else {
                         check_and_get_illegal_move_origin(bccx, b)
                     }
                 }
-                ty::TySlice(..) => Some(cmt.clone()),
+                ty::Slice(..) => Some(cmt.clone()),
                 _ => {
                     check_and_get_illegal_move_origin(bccx, b)
                 }

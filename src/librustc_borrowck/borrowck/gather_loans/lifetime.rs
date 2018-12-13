@@ -28,8 +28,7 @@ pub fn guarantee_lifetime<'a, 'tcx>(bccx: &BorrowckCtxt<'a, 'tcx>,
                                     span: Span,
                                     cause: euv::LoanCause,
                                     cmt: &'a mc::cmt_<'tcx>,
-                                    loan_region: ty::Region<'tcx>,
-                                    _: ty::BorrowKind)
+                                    loan_region: ty::Region<'tcx>)
                                     -> Result<(),()> {
     //! Reports error if `loan_region` is larger than S
     //! where S is `item_scope` if `cmt` is an upvar,
@@ -71,6 +70,7 @@ impl<'a, 'tcx> GuaranteeLifetimeContext<'a, 'tcx> {
 
         match cmt.cat {
             Categorization::Rvalue(..) |
+            Categorization::ThreadLocal(..) |
             Categorization::Local(..) |                     // L-Local
             Categorization::Upvar(..) |
             Categorization::Deref(_, mc::BorrowedPtr(..)) | // L-Deref-Borrowed
@@ -106,6 +106,7 @@ impl<'a, 'tcx> GuaranteeLifetimeContext<'a, 'tcx> {
         //! rooting etc, and presuming `cmt` is not mutated.
 
         match cmt.cat {
+            Categorization::ThreadLocal(temp_scope) |
             Categorization::Rvalue(temp_scope) => {
                 temp_scope
             }
@@ -113,7 +114,7 @@ impl<'a, 'tcx> GuaranteeLifetimeContext<'a, 'tcx> {
                 self.bccx.tcx.mk_region(ty::ReScope(self.item_scope))
             }
             Categorization::Local(local_id) => {
-                let hir_id = self.bccx.tcx.hir.node_to_hir_id(local_id);
+                let hir_id = self.bccx.tcx.hir().node_to_hir_id(local_id);
                 self.bccx.tcx.mk_region(ty::ReScope(
                     self.bccx.region_scope_tree.var_scope(hir_id.local_id)))
             }

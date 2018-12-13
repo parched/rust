@@ -273,7 +273,7 @@ pub enum ExprPrecedence {
     Loop,
     Match,
     Block,
-    Catch,
+    TryBlock,
     Struct,
     Async,
 }
@@ -332,7 +332,7 @@ impl ExprPrecedence {
             ExprPrecedence::Loop |
             ExprPrecedence::Match |
             ExprPrecedence::Block |
-            ExprPrecedence::Catch |
+            ExprPrecedence::TryBlock |
             ExprPrecedence::Async |
             ExprPrecedence::Struct => PREC_PAREN,
         }
@@ -340,8 +340,8 @@ impl ExprPrecedence {
 }
 
 
-/// Expressions that syntactically contain an "exterior" struct literal i.e. not surrounded by any
-/// parens or other delimiters, e.g. `X { y: 1 }`, `X { y: 1 }.method()`, `foo == X { y: 1 }` and
+/// Expressions that syntactically contain an "exterior" struct literal i.e., not surrounded by any
+/// parens or other delimiters, e.g., `X { y: 1 }`, `X { y: 1 }.method()`, `foo == X { y: 1 }` and
 /// `X { y: 1 } == foo` all do, but `(X { y: 1 }) == foo` does not.
 pub fn contains_exterior_struct_lit(value: &ast::Expr) -> bool {
     match value.node {

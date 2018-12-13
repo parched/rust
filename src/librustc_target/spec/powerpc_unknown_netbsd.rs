@@ -15,9 +15,6 @@ pub fn target() -> TargetResult {
     base.pre_link_args.get_mut(&LinkerFlavor::Gcc).unwrap().push("-m32".to_string());
     base.max_atomic_width = Some(32);
 
-    // see #36994
-    base.exe_allocation_crate = None;
-
     Ok(Target {
         llvm_target: "powerpc-unknown-netbsd".to_string(),
         target_endian: "big".to_string(),
@@ -26,7 +23,7 @@ pub fn target() -> TargetResult {
         data_layout: "E-m:e-p:32:32-i64:64-n32".to_string(),
         arch: "powerpc".to_string(),
         target_os: "netbsd".to_string(),
-        target_env: "".to_string(),
+        target_env: String::new(),
         target_vendor: "unknown".to_string(),
         linker_flavor: LinkerFlavor::Gcc,
         options: base,

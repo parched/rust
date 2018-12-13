@@ -62,7 +62,7 @@ impl<'a, 'gcx, 'tcx> TypeFreshener<'a, 'gcx, 'tcx> {
         TypeFreshener {
             infcx,
             freshen_count: 0,
-            freshen_map: FxHashMap(),
+            freshen_map: Default::default(),
         }
     }
 
@@ -107,14 +107,13 @@ impl<'a, 'gcx, 'tcx> TypeFolder<'gcx, 'tcx> for TypeFreshener<'a, 'gcx, 'tcx> {
             ty::ReFree(_) |
             ty::ReScope(_) |
             ty::ReVar(_) |
-            ty::ReSkolemized(..) |
+            ty::RePlaceholder(..) |
             ty::ReEmpty |
             ty::ReErased => {
                 // replace all free regions with 'erased
                 self.tcx().types.re_erased
             }
 
-            ty::ReCanonical(..) |
             ty::ReClosureBound(..) => {
                 bug!(
                     "encountered unexpected region: {:?}",
@@ -133,7 +132,7 @@ impl<'a, 'gcx, 'tcx> TypeFolder<'gcx, 'tcx> for TypeFreshener<'a, 'gcx, 'tcx> {
         let tcx = self.infcx.tcx;
 
         match t.sty {
-            ty::TyInfer(ty::TyVar(v)) => {
+            ty::Infer(ty::TyVar(v)) => {
                 let opt_ty = self.infcx.type_variables.borrow_mut().probe(v).known();
                 self.freshen(
                     opt_ty,
@@ -141,7 +140,7 @@ impl<'a, 'gcx, 'tcx> TypeFolder<'gcx, 'tcx> for TypeFreshener<'a, 'gcx, 'tcx> {
                     ty::FreshTy)
             }
 
-            ty::TyInfer(ty::IntVar(v)) => {
+            ty::Infer(ty::IntVar(v)) => {
                 self.freshen(
                     self.infcx.int_unification_table.borrow_mut()
                                                     .probe_value(v)
@@ -150,7 +149,7 @@ impl<'a, 'gcx, 'tcx> TypeFolder<'gcx, 'tcx> for TypeFreshener<'a, 'gcx, 'tcx> {
                     ty::FreshIntTy)
             }
 
-            ty::TyInfer(ty::FloatVar(v)) => {
+            ty::Infer(ty::FloatVar(v)) => {
                 self.freshen(
                     self.infcx.float_unification_table.borrow_mut()
                                                       .probe_value(v)
@@ -159,9 +158,9 @@ impl<'a, 'gcx, 'tcx> TypeFolder<'gcx, 'tcx> for TypeFreshener<'a, 'gcx, 'tcx> {
                     ty::FreshFloatTy)
             }
 
-            ty::TyInfer(ty::FreshTy(c)) |
-            ty::TyInfer(ty::FreshIntTy(c)) |
-            ty::TyInfer(ty::FreshFloatTy(c)) => {
+            ty::Infer(ty::FreshTy(c)) |
+            ty::Infer(ty::FreshIntTy(c)) |
+            ty::Infer(ty::FreshFloatTy(c)) => {
                 if c >= self.freshen_count {
                     bug!("Encountered a freshend type with id {} \
                           but our counter is only at {}",
@@ -171,35 +170,36 @@ impl<'a, 'gcx, 'tcx> TypeFolder<'gcx, 'tcx> for TypeFreshener<'a, 'gcx, 'tcx> {
                 t
             }
 
-            ty::TyInfer(ty::CanonicalTy(..)) =>
-                bug!("encountered canonical ty during freshening"),
-
-            ty::TyGenerator(..) |
-            ty::TyBool |
-            ty::TyChar |
-            ty::TyInt(..) |
-            ty::TyUint(..) |
-            ty::TyFloat(..) |
-            ty::TyAdt(..) |
-            ty::TyStr |
-            ty::TyError |
-            ty::TyArray(..) |
-            ty::TySlice(..) |
-            ty::TyRawPtr(..) |
-            ty::TyRef(..) |
-            ty::TyFnDef(..) |
-            ty::TyFnPtr(_) |
-            ty::TyDynamic(..) |
-            ty::TyNever |
-            ty::TyTuple(..) |
-            ty::TyProjection(..) |
-            ty::TyForeign(..) |
-            ty::TyParam(..) |
-            ty::TyClosure(..) |
-            ty::TyGeneratorWitness(..) |
-            ty::TyAnon(..) => {
+            ty::Generator(..) |
+            ty::Bool |
+            ty::Char |
+            ty::Int(..) |
+            ty::Uint(..) |
+            ty::Float(..) |
+            ty::Adt(..) |
+            ty::Str |
+            ty::Error |
+            ty::Array(..) |
+            ty::Slice(..) |
+            ty::RawPtr(..) |
+            ty::Ref(..) |
+            ty::FnDef(..) |
+            ty::FnPtr(_) |
+            ty::Dynamic(..) |
+            ty::Never |
+            ty::Tuple(..) |
+            ty::Projection(..) |
+            ty::UnnormalizedProjection(..) |
+            ty::Foreign(..) |
+            ty::Param(..) |
+            ty::Closure(..) |
+            ty::GeneratorWitness(..) |
+            ty::Opaque(..) => {
                 t.super_fold_with(self)
             }
+
+            ty::Placeholder(..) |
+            ty::Bound(..) => bug!("unexpected type {:?}", t),
         }
     }
 }

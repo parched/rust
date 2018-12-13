@@ -93,7 +93,7 @@ impl<'a, 'tcx> SolveContext<'a, 'tcx> {
 
         let solutions = &self.solutions;
         self.terms_cx.inferred_starts.iter().map(|(&id, &InferredIndex(start))| {
-            let def_id = tcx.hir.local_def_id(id);
+            let def_id = tcx.hir().local_def_id(id);
             let generics = tcx.generics_of(def_id);
 
             let mut variances = solutions[start..start+generics.count()].to_vec();
@@ -101,7 +101,7 @@ impl<'a, 'tcx> SolveContext<'a, 'tcx> {
             debug!("id={} variances={:?}", id, variances);
 
             // Functions can have unused type parameters: make those invariant.
-            if let ty::TyFnDef(..) = tcx.type_of(def_id).sty {
+            if let ty::FnDef(..) = tcx.type_of(def_id).sty {
                 for variance in &mut variances {
                     if *variance == ty::Bivariant {
                         *variance = ty::Invariant;

@@ -24,9 +24,10 @@ pub use self::Linkage::*;
 use std::str::FromStr;
 use std::string::FromUtf8Error;
 use std::slice;
-use std::ffi::{CString, CStr};
+use std::ffi::CStr;
 use std::cell::RefCell;
 use libc::{self, c_uint, c_char, size_t};
+use rustc_data_structures::small_c_str::SmallCStr;
 
 pub mod archive_ro;
 pub mod diagnostic;
@@ -124,7 +125,7 @@ pub fn SetFunctionCallConv(fn_: &'a Value, cc: CallConv) {
 // example happen for generics when using multiple codegen units. This function simply uses the
 // value's name as the comdat value to make sure that it is in a 1-to-1 relationship to the
 // function.
-// For more details on COMDAT sections see e.g. http://www.airs.com/blog/archives/52
+// For more details on COMDAT sections see e.g., http://www.airs.com/blog/archives/52
 pub fn SetUniqueComdat(llmod: &Module, val: &'a Value) {
     unsafe {
         LLVMRustSetComdat(llmod, val, LLVMGetValueName(val));
@@ -189,7 +190,7 @@ impl ObjectFile {
     pub fn new(llmb: &'static mut MemoryBuffer) -> Option<ObjectFile> {
         unsafe {
             let llof = LLVMCreateObjectFile(llmb)?;
-            Some(ObjectFile { llof: llof })
+            Some(ObjectFile { llof })
         }
     }
 }
@@ -264,7 +265,7 @@ pub struct OperandBundleDef<'a> {
 
 impl OperandBundleDef<'a> {
     pub fn new(name: &str, vals: &[&'a Value]) -> Self {
-        let name = CString::new(name).unwrap();
+        let name = SmallCStr::new(name);
         let def = unsafe {
             LLVMRustBuildOperandBundleDef(name.as_ptr(), vals.as_ptr(), vals.len() as c_uint)
         };

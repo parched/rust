@@ -36,6 +36,8 @@ pub enum NonMacroAttrKind {
     Tool,
     /// Single-segment custom attribute registered by a derive macro (`#[serde(default)]`).
     DeriveHelper,
+    /// Single-segment custom attribute registered by a legacy plugin (`register_attribute`).
+    LegacyPluginHelper,
     /// Single-segment custom attribute not registered in any way (`#[my_attr]`).
     Custom,
 }
@@ -44,7 +46,7 @@ pub enum NonMacroAttrKind {
 pub enum Def {
     // Type namespace
     Mod(DefId),
-    Struct(DefId), // DefId refers to NodeId of the struct itself
+    Struct(DefId), // `DefId` refers to `NodeId` of the struct itself
     Union(DefId),
     Enum(DefId),
     Variant(DefId),
@@ -53,7 +55,7 @@ pub enum Def {
     Existential(DefId),
     /// `type Foo = Bar;`
     TyAlias(DefId),
-    TyForeign(DefId),
+    ForeignTy(DefId),
     TraitAlias(DefId),
     AssociatedTy(DefId),
     /// `existential type Foo: Bar;`
@@ -61,26 +63,27 @@ pub enum Def {
     PrimTy(hir::PrimTy),
     TyParam(DefId),
     SelfTy(Option<DefId> /* trait */, Option<DefId> /* impl */),
-    ToolMod, // e.g. `rustfmt` in `#[rustfmt::skip]`
+    ToolMod, // e.g., `rustfmt` in `#[rustfmt::skip]`
 
     // Value namespace
     Fn(DefId),
     Const(DefId),
     Static(DefId, bool /* is_mutbl */),
-    StructCtor(DefId, CtorKind), // DefId refers to NodeId of the struct's constructor
-    VariantCtor(DefId, CtorKind),
+    StructCtor(DefId, CtorKind), // `DefId` refers to `NodeId` of the struct's constructor
+    VariantCtor(DefId, CtorKind), // `DefId` refers to the enum variant
+    SelfCtor(DefId /* impl */),  // `DefId` refers to the impl
     Method(DefId),
     AssociatedConst(DefId),
 
     Local(ast::NodeId),
-    Upvar(ast::NodeId,  // node id of closed over local
-          usize,        // index in the freevars list of the closure
+    Upvar(ast::NodeId,  // `NodeId` of closed over local
+          usize,        // index in the `freevars` list of the closure
           ast::NodeId), // expr node that creates the closure
     Label(ast::NodeId),
 
     // Macro namespace
     Macro(DefId, MacroKind),
-    NonMacroAttr(NonMacroAttrKind), // e.g. `#[inline]` or `#[rustfmt::skip]`
+    NonMacroAttr(NonMacroAttrKind), // e.g., `#[inline]` or `#[rustfmt::skip]`
 
     // Both namespaces
     Err,
@@ -125,14 +128,6 @@ impl PathResolution {
     pub fn unresolved_segments(&self) -> usize {
         self.unresolved_segments
     }
-
-    pub fn kind_name(&self) -> &'static str {
-        if self.unresolved_segments != 0 {
-            "associated item"
-        } else {
-            self.base_def.kind_name()
-        }
-    }
 }
 
 /// Different kinds of symbols don't influence each other.
@@ -175,6 +170,7 @@ impl<T> PerNS<T> {
 
 impl<T> ::std::ops::Index<Namespace> for PerNS<T> {
     type Output = T;
+
     fn index(&self, ns: Namespace) -> &T {
         match ns {
             ValueNS => &self.value_ns,
@@ -243,6 +239,7 @@ impl CtorKind {
             ast::VariantData::Struct(..) => CtorKind::Fictive,
         }
     }
+
     pub fn from_hir(vdata: &hir::VariantData) -> CtorKind {
         match *vdata {
             hir::VariantData::Tuple(..) => CtorKind::Fn,
@@ -258,6 +255,7 @@ impl NonMacroAttrKind {
             NonMacroAttrKind::Builtin => "built-in attribute",
             NonMacroAttrKind::Tool => "tool attribute",
             NonMacroAttrKind::DeriveHelper => "derive helper attribute",
+            NonMacroAttrKind::LegacyPluginHelper => "legacy plugin helper attribute",
             NonMacroAttrKind::Custom => "custom attribute",
         }
     }
@@ -265,6 +263,12 @@ impl NonMacroAttrKind {
 
 impl Def {
     pub fn def_id(&self) -> DefId {
+        self.opt_def_id().unwrap_or_else(|| {
+            bug!("attempted .def_id() on invalid def: {:?}", self)
+        })
+    }
+
+    pub fn opt_def_id(&self) -> Option<DefId> {
         match *self {
             Def::Fn(id) | Def::Mod(id) | Def::Static(id, _) |
             Def::Variant(id) | Def::VariantCtor(id, ..) | Def::Enum(id) |
@@ -272,8 +276,8 @@ impl Def {
             Def::AssociatedTy(id) | Def::TyParam(id) | Def::Struct(id) | Def::StructCtor(id, ..) |
             Def::Union(id) | Def::Trait(id) | Def::Method(id) | Def::Const(id) |
             Def::AssociatedConst(id) | Def::Macro(id, ..) |
-            Def::Existential(id) | Def::AssociatedExistential(id) | Def::TyForeign(id) => {
-                id
+            Def::Existential(id) | Def::AssociatedExistential(id) | Def::ForeignTy(id) => {
+                Some(id)
             }
 
             Def::Local(..) |
@@ -281,10 +285,11 @@ impl Def {
             Def::Label(..)  |
             Def::PrimTy(..) |
             Def::SelfTy(..) |
+            Def::SelfCtor(..) |
             Def::ToolMod |
             Def::NonMacroAttr(..) |
             Def::Err => {
-                bug!("attempted .def_id() on invalid def: {:?}", self)
+                None
             }
         }
     }
@@ -309,9 +314,10 @@ impl Def {
             Def::StructCtor(.., CtorKind::Fn) => "tuple struct",
             Def::StructCtor(.., CtorKind::Const) => "unit struct",
             Def::StructCtor(.., CtorKind::Fictive) => bug!("impossible struct constructor"),
+            Def::SelfCtor(..) => "self constructor",
             Def::Union(..) => "union",
             Def::Trait(..) => "trait",
-            Def::TyForeign(..) => "foreign type",
+            Def::ForeignTy(..) => "foreign type",
             Def::Method(..) => "method",
             Def::Const(..) => "constant",
             Def::AssociatedConst(..) => "associated constant",
@@ -325,6 +331,15 @@ impl Def {
             Def::ToolMod => "tool module",
             Def::NonMacroAttr(attr_kind) => attr_kind.descr(),
             Def::Err => "unresolved item",
+        }
+    }
+
+    pub fn article(&self) -> &'static str {
+        match *self {
+            Def::AssociatedTy(..) | Def::AssociatedConst(..) | Def::AssociatedExistential(..) |
+            Def::Enum(..) | Def::Existential(..) | Def::Err => "an",
+            Def::Macro(.., macro_kind) => macro_kind.article(),
+            _ => "a",
         }
     }
 }

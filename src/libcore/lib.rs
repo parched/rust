@@ -77,7 +77,6 @@
 #![feature(arbitrary_self_types)]
 #![feature(asm)]
 #![feature(associated_type_defaults)]
-#![feature(attr_literals)]
 #![feature(cfg_target_has_atomic)]
 #![feature(concat_idents)]
 #![feature(const_fn)]
@@ -92,8 +91,9 @@
 #![feature(lang_items)]
 #![feature(link_llvm_intrinsics)]
 #![feature(never_type)]
+#![feature(nll)]
+#![feature(bind_by_move_pattern_guards)]
 #![feature(exhaustive_patterns)]
-#![feature(macro_at_most_once_rep)]
 #![feature(no_core)]
 #![feature(on_unimplemented)]
 #![feature(optin_builtin_traits)]
@@ -106,6 +106,7 @@
 #![feature(staged_api)]
 #![feature(stmt_expr_attributes)]
 #![feature(unboxed_closures)]
+#![feature(unsized_locals)]
 #![feature(untagged_unions)]
 #![feature(unwind_attributes)]
 #![feature(doc_alias)]
@@ -116,9 +117,19 @@
 #![feature(powerpc_target_feature)]
 #![feature(mips_target_feature)]
 #![feature(aarch64_target_feature)]
+#![feature(wasm_target_feature)]
 #![feature(const_slice_len)]
 #![feature(const_str_as_bytes)]
 #![feature(const_str_len)]
+#![feature(const_let)]
+#![feature(const_int_rotate)]
+#![feature(const_int_wrapping)]
+#![feature(const_int_sign)]
+#![feature(const_int_conversion)]
+#![feature(const_transmute)]
+#![feature(reverse_bits)]
+#![feature(non_exhaustive)]
+#![feature(structural_match)]
 
 #[prelude_import]
 #[allow(unused)]
@@ -189,10 +200,12 @@ pub mod cell;
 pub mod char;
 pub mod panic;
 pub mod panicking;
+pub mod pin;
 pub mod iter;
 pub mod option;
 pub mod raw;
 pub mod result;
+pub mod ffi;
 
 pub mod slice;
 pub mod str;
@@ -216,7 +229,7 @@ mod nonzero;
 mod tuple;
 mod unit;
 
-// Pull in the the `coresimd` crate directly into libcore. This is where all the
+// Pull in the `coresimd` crate directly into libcore. This is where all the
 // architecture-specific (and vendor-specific) intrinsics are defined. AKA
 // things like SIMD and such. Note that the actual source for all this lies in a
 // different repository, rust-lang-nursery/stdsimd. That's why the setup here is
@@ -238,9 +251,7 @@ macro_rules! vector_impl { ($([$f:ident, $($args:tt)*]),*) => { $($f!($($args)*)
 #[path = "../stdsimd/coresimd/mod.rs"]
 #[allow(missing_docs, missing_debug_implementations, dead_code, unused_imports)]
 #[unstable(feature = "stdsimd", issue = "48556")]
-#[cfg(not(stage0))] // allow changes to how stdsimd works in stage0
 mod coresimd;
 
 #[stable(feature = "simd_arch", since = "1.27.0")]
-#[cfg(not(stage0))]
 pub use coresimd::arch;

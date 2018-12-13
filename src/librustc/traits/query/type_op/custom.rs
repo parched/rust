@@ -12,10 +12,10 @@ use infer::{InferCtxt, InferOk};
 use std::fmt;
 use traits::query::Fallible;
 
-use infer::canonical::query_result;
+use infer::canonical::query_response;
 use infer::canonical::QueryRegionConstraint;
 use std::rc::Rc;
-use syntax::codemap::DUMMY_SP;
+use syntax::source_map::DUMMY_SP;
 use traits::{ObligationCause, TraitEngine, TraitEngineExt};
 
 pub struct CustomTypeOp<F, G> {
@@ -62,7 +62,7 @@ impl<F, G> fmt::Debug for CustomTypeOp<F, G>
 where
     G: Fn() -> String,
 {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", (self.description)())
     }
 }
@@ -102,8 +102,14 @@ fn scrape_region_constraints<'gcx, 'tcx, R>(
 
     let region_constraint_data = infcx.take_and_reset_region_constraints();
 
-    let outlives =
-        query_result::make_query_outlives(infcx.tcx, region_obligations, &region_constraint_data);
+    let outlives = query_response::make_query_outlives(
+        infcx.tcx,
+        region_obligations
+            .iter()
+            .map(|(_, r_o)| (r_o.sup_type, r_o.sub_region))
+            .map(|(ty, r)| (infcx.resolve_type_vars_if_possible(&ty), r)),
+        &region_constraint_data,
+    );
 
     if outlives.is_empty() {
         Ok((value, None))

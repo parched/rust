@@ -34,7 +34,7 @@ pub struct Match<'a, 'gcx: 'a+'tcx, 'tcx: 'a> {
 
 impl<'a, 'gcx, 'tcx> Match<'a, 'gcx, 'tcx> {
     pub fn new(tcx: TyCtxt<'a, 'gcx, 'tcx>) -> Match<'a, 'gcx, 'tcx> {
-        Match { tcx: tcx }
+        Match { tcx }
     }
 }
 
@@ -67,18 +67,18 @@ impl<'a, 'gcx, 'tcx> TypeRelation<'a, 'gcx, 'tcx> for Match<'a, 'gcx, 'tcx> {
         if a == b { return Ok(a); }
 
         match (&a.sty, &b.sty) {
-            (_, &ty::TyInfer(ty::FreshTy(_))) |
-            (_, &ty::TyInfer(ty::FreshIntTy(_))) |
-            (_, &ty::TyInfer(ty::FreshFloatTy(_))) => {
+            (_, &ty::Infer(ty::FreshTy(_))) |
+            (_, &ty::Infer(ty::FreshIntTy(_))) |
+            (_, &ty::Infer(ty::FreshFloatTy(_))) => {
                 Ok(a)
             }
 
-            (&ty::TyInfer(_), _) |
-            (_, &ty::TyInfer(_)) => {
+            (&ty::Infer(_), _) |
+            (_, &ty::Infer(_)) => {
                 Err(TypeError::Sorts(relate::expected_found(self, &a, &b)))
             }
 
-            (&ty::TyError, _) | (_, &ty::TyError) => {
+            (&ty::Error, _) | (_, &ty::Error) => {
                 Ok(self.tcx().types.err)
             }
 

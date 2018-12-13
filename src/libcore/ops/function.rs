@@ -26,7 +26,7 @@
 /// is expected.
 ///
 /// Use `Fn` as a bound when you want to accept a parameter of function-like
-/// type and need to call it repeatedly and without mutating state (e.g. when
+/// type and need to call it repeatedly and without mutating state (e.g., when
 /// calling it concurrently). If you do not need such strict requirements, use
 /// [`FnMut`] or [`FnOnce`] as bounds.
 ///
@@ -66,6 +66,11 @@
 #[lang = "fn"]
 #[stable(feature = "rust1", since = "1.0.0")]
 #[rustc_paren_sugar]
+#[rustc_on_unimplemented(
+    on(Args="()", note="wrap the `{Self}` in a closure with no arguments: `|| {{ /* code */ }}"),
+    message="expected a `{Fn}<{Args}>` closure, found `{Self}`",
+    label="expected an `Fn<{Args}>` closure, found `{Self}`",
+)]
 #[fundamental] // so that regex can rely that `&str: !FnMut`
 pub trait Fn<Args> : FnMut<Args> {
     /// Performs the call operation.
@@ -79,7 +84,7 @@ pub trait Fn<Args> : FnMut<Args> {
 ///
 /// `FnMut` is implemented automatically by closures which take mutable
 /// references to captured variables, as well as all types that implement
-/// [`Fn`], e.g. (safe) [function pointers][] (since `FnMut` is a supertrait of
+/// [`Fn`], e.g., (safe) [function pointers][] (since `FnMut` is a supertrait of
 /// [`Fn`]). Additionally, for any type `F` that implements `FnMut`, `&mut F`
 /// implements `FnMut`, too.
 ///
@@ -139,6 +144,11 @@ pub trait Fn<Args> : FnMut<Args> {
 #[lang = "fn_mut"]
 #[stable(feature = "rust1", since = "1.0.0")]
 #[rustc_paren_sugar]
+#[rustc_on_unimplemented(
+    on(Args="()", note="wrap the `{Self}` in a closure with no arguments: `|| {{ /* code */ }}"),
+    message="expected a `{FnMut}<{Args}>` closure, found `{Self}`",
+    label="expected an `FnMut<{Args}>` closure, found `{Self}`",
+)]
 #[fundamental] // so that regex can rely that `&str: !FnMut`
 pub trait FnMut<Args> : FnOnce<Args> {
     /// Performs the call operation.
@@ -153,7 +163,7 @@ pub trait FnMut<Args> : FnOnce<Args> {
 /// implements `FnOnce`, it can only be called once.
 ///
 /// `FnOnce` is implemented automatically by closure that might consume captured
-/// variables, as well as all types that implement [`FnMut`], e.g. (safe)
+/// variables, as well as all types that implement [`FnMut`], e.g., (safe)
 /// [function pointers][] (since `FnOnce` is a supertrait of [`FnMut`]).
 ///
 /// Since both [`Fn`] and [`FnMut`] are subtraits of `FnOnce`, any instance of
@@ -212,6 +222,11 @@ pub trait FnMut<Args> : FnOnce<Args> {
 #[lang = "fn_once"]
 #[stable(feature = "rust1", since = "1.0.0")]
 #[rustc_paren_sugar]
+#[rustc_on_unimplemented(
+    on(Args="()", note="wrap the `{Self}` in a closure with no arguments: `|| {{ /* code */ }}"),
+    message="expected a `{FnOnce}<{Args}>` closure, found `{Self}`",
+    label="expected an `FnOnce<{Args}>` closure, found `{Self}`",
+)]
 #[fundamental] // so that regex can rely that `&str: !FnMut`
 pub trait FnOnce<Args> {
     /// The returned type after the call operator is used.
@@ -225,7 +240,7 @@ pub trait FnOnce<Args> {
 
 mod impls {
     #[stable(feature = "rust1", since = "1.0.0")]
-    impl<'a,A,F:?Sized> Fn<A> for &'a F
+    impl<A,F:?Sized> Fn<A> for &F
         where F : Fn<A>
     {
         extern "rust-call" fn call(&self, args: A) -> F::Output {
@@ -234,7 +249,7 @@ mod impls {
     }
 
     #[stable(feature = "rust1", since = "1.0.0")]
-    impl<'a,A,F:?Sized> FnMut<A> for &'a F
+    impl<A,F:?Sized> FnMut<A> for &F
         where F : Fn<A>
     {
         extern "rust-call" fn call_mut(&mut self, args: A) -> F::Output {
@@ -243,7 +258,7 @@ mod impls {
     }
 
     #[stable(feature = "rust1", since = "1.0.0")]
-    impl<'a,A,F:?Sized> FnOnce<A> for &'a F
+    impl<A,F:?Sized> FnOnce<A> for &F
         where F : Fn<A>
     {
         type Output = F::Output;
@@ -254,7 +269,7 @@ mod impls {
     }
 
     #[stable(feature = "rust1", since = "1.0.0")]
-    impl<'a,A,F:?Sized> FnMut<A> for &'a mut F
+    impl<A,F:?Sized> FnMut<A> for &mut F
         where F : FnMut<A>
     {
         extern "rust-call" fn call_mut(&mut self, args: A) -> F::Output {
@@ -263,7 +278,7 @@ mod impls {
     }
 
     #[stable(feature = "rust1", since = "1.0.0")]
-    impl<'a,A,F:?Sized> FnOnce<A> for &'a mut F
+    impl<A,F:?Sized> FnOnce<A> for &mut F
         where F : FnMut<A>
     {
         type Output = F::Output;

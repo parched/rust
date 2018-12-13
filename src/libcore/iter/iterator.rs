@@ -31,10 +31,71 @@ fn _assert_is_object_safe(_: &dyn Iterator<Item=()>) {}
 #[stable(feature = "rust1", since = "1.0.0")]
 #[rustc_on_unimplemented(
     on(
+        _Self="[std::ops::Range<Idx>; 1]",
+        label="if you meant to iterate between two values, remove the square brackets",
+        note="`[start..end]` is an array of one `Range`; you might have meant to have a `Range` \
+              without the brackets: `start..end`"
+    ),
+    on(
+        _Self="[std::ops::RangeFrom<Idx>; 1]",
+        label="if you meant to iterate from a value onwards, remove the square brackets",
+        note="`[start..]` is an array of one `RangeFrom`; you might have meant to have a \
+              `RangeFrom` without the brackets: `start..`, keeping in mind that iterating over an \
+              unbounded iterator will run forever unless you `break` or `return` from within the \
+              loop"
+    ),
+    on(
+        _Self="[std::ops::RangeTo<Idx>; 1]",
+        label="if you meant to iterate until a value, remove the square brackets and add a \
+               starting value",
+        note="`[..end]` is an array of one `RangeTo`; you might have meant to have a bounded \
+              `Range` without the brackets: `0..end`"
+    ),
+    on(
+        _Self="[std::ops::RangeInclusive<Idx>; 1]",
+        label="if you meant to iterate between two values, remove the square brackets",
+        note="`[start..=end]` is an array of one `RangeInclusive`; you might have meant to have a \
+              `RangeInclusive` without the brackets: `start..=end`"
+    ),
+    on(
+        _Self="[std::ops::RangeToInclusive<Idx>; 1]",
+        label="if you meant to iterate until a value (including it), remove the square brackets \
+               and add a starting value",
+        note="`[..=end]` is an array of one `RangeToInclusive`; you might have meant to have a \
+              bounded `RangeInclusive` without the brackets: `0..=end`"
+    ),
+    on(
+        _Self="std::ops::RangeTo<Idx>",
+        label="if you meant to iterate until a value, add a starting value",
+        note="`..end` is a `RangeTo`, which cannot be iterated on; you might have meant to have a \
+              bounded `Range`: `0..end`"
+    ),
+    on(
+        _Self="std::ops::RangeToInclusive<Idx>",
+        label="if you meant to iterate until a value (including it), add a starting value",
+        note="`..=end` is a `RangeToInclusive`, which cannot be iterated on; you might have meant \
+              to have a bounded `RangeInclusive`: `0..=end`"
+    ),
+    on(
         _Self="&str",
         label="`{Self}` is not an iterator; try calling `.chars()` or `.bytes()`"
     ),
-    label="`{Self}` is not an iterator; maybe try calling `.iter()` or a similar method"
+    on(
+        _Self="std::string::String",
+        label="`{Self}` is not an iterator; try calling `.chars()` or `.bytes()`"
+    ),
+    on(
+        _Self="[]",
+        label="borrow the array with `&` or call `.iter()` on it to iterate over it",
+        note="arrays are not an iterators, but slices like the following are: `&[1, 2, 3]`"
+    ),
+    on(
+        _Self="{integral}",
+        note="if you want to iterate between `start` until a value `end`, use the exclusive range \
+              syntax `start..end` or the inclusive range syntax `start..=end`"
+    ),
+    label="`{Self}` is not an iterator",
+    message="`{Self}` is not an iterator"
 )]
 #[doc(spotlight)]
 pub trait Iterator {
@@ -93,7 +154,7 @@ pub trait Iterator {
     ///
     /// `size_hint()` is primarily intended to be used for optimizations such as
     /// reserving space for the elements of the iterator, but must not be
-    /// trusted to e.g. omit bounds checks in unsafe code. An incorrect
+    /// trusted to e.g., omit bounds checks in unsafe code. An incorrect
     /// implementation of `size_hint()` should not lead to memory safety
     /// violations.
     ///
@@ -458,7 +519,7 @@ pub trait Iterator {
     /// element.
     ///
     /// `map()` transforms one iterator into another, by means of its argument:
-    /// something that implements `FnMut`. It produces a new iterator which
+    /// something that implements [`FnMut`]. It produces a new iterator which
     /// calls this closure on each element of the original iterator.
     ///
     /// If you are good at thinking in types, you can think of `map()` like this:
@@ -471,7 +532,8 @@ pub trait Iterator {
     /// If you're doing some sort of looping for a side effect, it's considered
     /// more idiomatic to use [`for`] than `map()`.
     ///
-    /// [`for`]: ../../book/first-edition/loops.html#for
+    /// [`for`]: ../../book/ch03-05-control-flow.html#looping-through-a-collection-with-for
+    /// [`FnMut`]: ../../std/ops/trait.FnMut.html
     ///
     /// # Examples
     ///
@@ -519,7 +581,7 @@ pub trait Iterator {
     /// cases `for_each` may also be faster than a loop, because it will use
     /// internal iteration on adaptors like `Chain`.
     ///
-    /// [`for`]: ../../book/first-edition/loops.html#for
+    /// [`for`]: ../../book/ch03-05-control-flow.html#looping-through-a-collection-with-for
     ///
     /// # Examples
     ///
@@ -1110,7 +1172,7 @@ pub trait Iterator {
     ///
     /// [`flat_map()`]: #method.flat_map
     #[inline]
-    #[stable(feature = "iterator_flatten", since = "1.29")]
+    #[stable(feature = "iterator_flatten", since = "1.29.0")]
     fn flatten(self) -> Flatten<Self>
     where Self: Sized, Self::Item: IntoIterator {
         Flatten { inner: flatten_compat(self) }
@@ -1608,7 +1670,7 @@ pub trait Iterator {
     /// use a `for` loop with a list of things to build up a result. Those
     /// can be turned into `fold()`s:
     ///
-    /// [`for`]: ../../book/first-edition/loops.html#for
+    /// [`for`]: ../../book/ch03-05-control-flow.html#looping-through-a-collection-with-for
     ///
     /// ```
     /// let numbers = [1, 2, 3, 4, 5];
@@ -1794,17 +1856,14 @@ pub trait Iterator {
     /// # Examples
     ///
     /// ```
-    /// #![feature(iterator_find_map)]
     /// let a = ["lol", "NaN", "2", "5"];
     ///
-    /// let mut first_number = a.iter().find_map(|s| s.parse().ok());
+    /// let first_number = a.iter().find_map(|s| s.parse().ok());
     ///
     /// assert_eq!(first_number, Some(2));
     /// ```
     #[inline]
-    #[unstable(feature = "iterator_find_map",
-               reason = "unstable new API",
-               issue = "49602")]
+    #[stable(feature = "iterator_find_map", since = "1.30.0")]
     fn find_map<B, F>(&mut self, mut f: F) -> Option<B> where
         Self: Sized,
         F: FnMut(Self::Item) -> Option<B>,
@@ -2560,7 +2619,7 @@ fn select_fold1<I, B, FProj, FCmp>(mut it: I,
 }
 
 #[stable(feature = "rust1", since = "1.0.0")]
-impl<'a, I: Iterator + ?Sized> Iterator for &'a mut I {
+impl<I: Iterator + ?Sized> Iterator for &mut I {
     type Item = I::Item;
     fn next(&mut self) -> Option<I::Item> { (**self).next() }
     fn size_hint(&self) -> (usize, Option<usize>) { (**self).size_hint() }

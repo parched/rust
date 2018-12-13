@@ -30,7 +30,7 @@ pub fn is_disaligned<'a, 'tcx, L>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
 
     let ty = place.ty(local_decls, tcx).to_ty(tcx);
     match tcx.layout_raw(param_env.and(ty)) {
-        Ok(layout) if layout.align.abi() == 1 => {
+        Ok(layout) if layout.align.abi.bytes() == 1 => {
             // if the alignment is 1, the type can't be further
             // disaligned.
             debug!("is_disaligned({:?}) - align = 1", place);
@@ -59,7 +59,7 @@ fn is_within_packed<'a, 'tcx, L>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
             ProjectionElem::Field(..) => {
                 let ty = base.ty(local_decls, tcx).to_ty(tcx);
                 match ty.sty {
-                    ty::TyAdt(def, _) if def.repr.packed() => {
+                    ty::Adt(def, _) if def.repr.packed() => {
                         return true
                     }
                     _ => {}

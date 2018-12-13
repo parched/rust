@@ -47,9 +47,9 @@ impl<'combine, 'infcx, 'gcx, 'tcx> TypeRelation<'infcx, 'gcx, 'tcx>
                           b_subst: &'tcx Substs<'tcx>)
                           -> RelateResult<'tcx, &'tcx Substs<'tcx>>
     {
-        // NB: Once we are equating types, we don't care about
+        // N.B., once we are equating types, we don't care about
         // variance, so don't try to lookup the variance here. This
-        // also avoids some cycles (e.g. #41849) since looking up
+        // also avoids some cycles (e.g., #41849) since looking up
         // variance requires computing types which can require
         // performing trait matching (which then performs equality
         // unification).
@@ -74,27 +74,28 @@ impl<'combine, 'infcx, 'gcx, 'tcx> TypeRelation<'infcx, 'gcx, 'tcx>
         let infcx = self.fields.infcx;
         let a = infcx.type_variables.borrow_mut().replace_if_possible(a);
         let b = infcx.type_variables.borrow_mut().replace_if_possible(b);
+
+        debug!("{}.tys: replacements ({:?}, {:?})", self.tag(), a, b);
+
         match (&a.sty, &b.sty) {
-            (&ty::TyInfer(TyVar(a_id)), &ty::TyInfer(TyVar(b_id))) => {
+            (&ty::Infer(TyVar(a_id)), &ty::Infer(TyVar(b_id))) => {
                 infcx.type_variables.borrow_mut().equate(a_id, b_id);
-                Ok(a)
             }
 
-            (&ty::TyInfer(TyVar(a_id)), _) => {
+            (&ty::Infer(TyVar(a_id)), _) => {
                 self.fields.instantiate(b, RelationDir::EqTo, a_id, self.a_is_expected)?;
-                Ok(a)
             }
 
-            (_, &ty::TyInfer(TyVar(b_id))) => {
+            (_, &ty::Infer(TyVar(b_id))) => {
                 self.fields.instantiate(a, RelationDir::EqTo, b_id, self.a_is_expected)?;
-                Ok(a)
             }
 
             _ => {
                 self.fields.infcx.super_combine_tys(self, a, b)?;
-                Ok(a)
             }
         }
+
+        Ok(a)
     }
 
     fn regions(&mut self, a: ty::Region<'tcx>, b: ty::Region<'tcx>)

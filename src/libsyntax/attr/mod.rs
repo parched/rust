@@ -15,7 +15,7 @@ mod builtin;
 pub use self::builtin::{
     cfg_matches, contains_feature_attr, eval_condition, find_crate_name, find_deprecation,
     find_repr_attrs, find_stability, find_unwind_attr, Deprecation, InlineAttr, IntType, ReprAttr,
-    RustcConstUnstable, RustcDeprecation, Stability, StabilityLevel, UnwindAttr,
+    RustcDeprecation, Stability, StabilityLevel, UnwindAttr,
 };
 pub use self::IntType::*;
 pub use self::ReprAttr::*;
@@ -25,7 +25,7 @@ use ast;
 use ast::{AttrId, Attribute, AttrStyle, Name, Ident, Path, PathSegment};
 use ast::{MetaItem, MetaItemKind, NestedMetaItem, NestedMetaItemKind};
 use ast::{Lit, LitKind, Expr, ExprKind, Item, Local, Stmt, StmtKind, GenericParam};
-use codemap::{BytePos, Spanned, respan, dummy_spanned};
+use source_map::{BytePos, Spanned, respan, dummy_spanned};
 use syntax_pos::{FileName, Span};
 use parse::lexer::comments::{doc_comment_style, strip_doc_comment_decoration};
 use parse::parser::Parser;
@@ -33,8 +33,8 @@ use parse::{self, ParseSess, PResult};
 use parse::token::{self, Token};
 use ptr::P;
 use symbol::Symbol;
-use tokenstream::{TokenStream, TokenTree, Delimited};
-use util::ThinVec;
+use ThinVec;
+use tokenstream::{TokenStream, TokenTree, DelimSpan};
 use GLOBALS;
 
 use std::iter;
@@ -96,7 +96,7 @@ impl NestedMetaItem {
         self.meta_item().map_or(false, |meta_item| meta_item.check_name(name))
     }
 
-    /// Returns the name of the meta item, e.g. `foo` in `#[foo]`,
+    /// Returns the name of the meta item, e.g., `foo` in `#[foo]`,
     /// `#[foo="bar"]` and `#[foo(bar)]`, if self is a MetaItem
     pub fn name(&self) -> Option<Name> {
         self.meta_item().and_then(|meta_item| Some(meta_item.name()))
@@ -180,7 +180,7 @@ impl Attribute {
     }
 
     /// Returns the **last** segment of the name of this attribute.
-    /// E.g. `foo` for `#[foo]`, `skip` for `#[rustfmt::skip]`.
+    /// e.g., `foo` for `#[foo]`, `skip` for `#[rustfmt::skip]`.
     pub fn name(&self) -> Name {
         name_from_path(&self.path)
     }
@@ -217,6 +217,15 @@ impl Attribute {
 impl MetaItem {
     pub fn name(&self) -> Name {
         name_from_path(&self.ident)
+    }
+
+    // #[attribute(name = "value")]
+    //             ^^^^^^^^^^^^^^
+    pub fn name_value_literal(&self) -> Option<&Lit> {
+        match &self.node {
+            MetaItemKind::NameValue(v) => Some(v),
+            _ => None,
+        }
     }
 
     pub fn value_str(&self) -> Option<Symbol> {
@@ -446,6 +455,11 @@ pub fn find_by_name<'a>(attrs: &'a [Attribute], name: &str) -> Option<&'a Attrib
     attrs.iter().find(|attr| attr.check_name(name))
 }
 
+pub fn filter_by_name<'a>(attrs: &'a [Attribute], name: &'a str)
+    -> impl Iterator<Item = &'a Attribute> {
+    attrs.iter().filter(move |attr| attr.check_name(name))
+}
+
 pub fn first_attr_value_str_by_name(attrs: &[Attribute], name: &str) -> Option<Symbol> {
     attrs.iter()
         .find(|at| at.check_name(name))
@@ -535,10 +549,11 @@ impl MetaItemKind {
                     }
                     tokens.push(item.node.tokens());
                 }
-                TokenTree::Delimited(span, Delimited {
-                    delim: token::Paren,
-                    tts: TokenStream::concat(tokens).into(),
-                }).into()
+                TokenTree::Delimited(
+                    DelimSpan::from_single(span),
+                    token::Paren,
+                    TokenStream::concat(tokens).into(),
+                ).into()
             }
         }
     }
@@ -556,9 +571,9 @@ impl MetaItemKind {
                     None
                 };
             }
-            Some(TokenTree::Delimited(_, ref delimited)) if delimited.delim == token::Paren => {
+            Some(TokenTree::Delimited(_, delim, ref tts)) if delim == token::Paren => {
                 tokens.next();
-                delimited.stream()
+                tts.stream()
             }
             _ => return Some(MetaItemKind::Word),
         };
@@ -607,7 +622,7 @@ impl NestedMetaItemKind {
 }
 
 impl Lit {
-    fn tokens(&self) -> TokenStream {
+    crate fn tokens(&self) -> TokenStream {
         TokenTree::Token(self.span, self.node.token()).into()
     }
 }
@@ -789,12 +804,12 @@ pub fn inject(mut krate: ast::Crate, parse_sess: &ParseSess, attrs: &[String]) -
     for raw_attr in attrs {
         let mut parser = parse::new_parser_from_source_str(
             parse_sess,
-            FileName::CliCrateAttr,
+            FileName::cli_crate_attr_source_code(&raw_attr),
             raw_attr.clone(),
         );
 
         let start_span = parser.span;
-        let (path, tokens) = panictry!(parser.parse_path_and_tokens());
+        let (path, tokens) = panictry!(parser.parse_meta_item_unrestricted());
         let end_span = parser.span;
         if parser.token != token::Eof {
             parse_sess.span_diagnostic

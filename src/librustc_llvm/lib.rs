@@ -8,6 +8,7 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+#![feature(nll)]
 #![feature(static_nobundle)]
 
 #![doc(html_logo_url = "https://www.rust-lang.org/logos/rust-logo-128x128-blk-v2.png",
@@ -21,7 +22,7 @@ extern crate rustc_cratesio_shim;
 // NOTE: This crate only exists to allow linking on mingw targets.
 
 /// Initialize targets enabled by the build script via `cfg(llvm_component = "...")`.
-/// NB: this function can't be moved to `rustc_codegen_llvm` because of the `cfg`s.
+/// N.B., this function can't be moved to `rustc_codegen_llvm` because of the `cfg`s.
 pub fn initialize_available_targets() {
     macro_rules! init_target(
         ($cfg:meta, $($method:ident),*) => { {

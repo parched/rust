@@ -13,7 +13,7 @@ set -ex
 
 source shared.sh
 
-LLVM=6.0.0
+LLVM=7.0.0
 
 mkdir clang
 cd clang
@@ -29,6 +29,12 @@ mkdir -p tools/clang
 curl https://releases.llvm.org/$LLVM/cfe-$LLVM.src.tar.xz | \
   xz -d | \
   tar xf - -C tools/clang --strip-components=1
+
+mkdir -p tools/lld
+
+curl https://releases.llvm.org/$LLVM/lld-$LLVM.src.tar.xz | \
+  xz -d | \
+  tar xf - -C tools/lld --strip-components=1
 
 mkdir ../clang-build
 cd ../clang-build

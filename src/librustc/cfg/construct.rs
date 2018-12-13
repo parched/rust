@@ -53,7 +53,7 @@ pub fn construct<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
     let body_exit;
 
     // Find the tables for this body.
-    let owner_def_id = tcx.hir.local_def_id(tcx.hir.body_owner(body.id()));
+    let owner_def_id = tcx.hir().local_def_id(tcx.hir().body_owner(body.id()));
     let tables = tcx.typeck_tables_of(owner_def_id);
 
     let mut cfg_builder = CFGBuilder {
@@ -109,7 +109,7 @@ impl<'a, 'tcx> CFGBuilder<'a, 'tcx> {
     }
 
     fn stmt(&mut self, stmt: &hir::Stmt, pred: CFGIndex) -> CFGIndex {
-        let hir_id = self.tcx.hir.node_to_hir_id(stmt.node.id());
+        let hir_id = self.tcx.hir().node_to_hir_id(stmt.node.id());
         match stmt.node {
             hir::StmtKind::Decl(ref decl, _) => {
                 let exit = self.decl(&decl, pred);
@@ -379,7 +379,7 @@ impl<'a, 'tcx> CFGBuilder<'a, 'tcx> {
             }
 
             hir::ExprKind::Index(ref l, ref r) |
-            hir::ExprKind::Binary(_, ref l, ref r) => { // NB: && and || handled earlier
+            hir::ExprKind::Binary(_, ref l, ref r) => { // N.B., && and || handled earlier
                 self.straightline(expr, pred, [l, r].iter().map(|&e| &**e))
             }
 
@@ -488,8 +488,9 @@ impl<'a, 'tcx> CFGBuilder<'a, 'tcx> {
                     // expression to target
                     let guard_start = self.add_dummy_node(&[pat_exit]);
                     // Visit the guard expression
-                    let guard_exit = self.expr(&guard, guard_start);
-
+                    let guard_exit = match guard {
+                        hir::Guard::If(ref e) => self.expr(e, guard_start),
+                    };
                     // #47295: We used to have very special case code
                     // here for when a pair of arms are both formed
                     // solely from constants, and if so, not add these
@@ -555,7 +556,10 @@ impl<'a, 'tcx> CFGBuilder<'a, 'tcx> {
                         target_scope: region::Scope,
                         to_index: CFGIndex) {
         let mut data = CFGEdgeData { exiting_scopes: vec![] };
-        let mut scope = region::Scope::Node(from_expr.hir_id.local_id);
+        let mut scope = region::Scope {
+            id: from_expr.hir_id.local_id,
+            data: region::ScopeData::Node
+        };
         let region_scope_tree = self.tcx.region_scope_tree(self.owner_def_id);
         while scope != target_scope {
             data.exiting_scopes.push(scope.item_local_id());
@@ -584,18 +588,24 @@ impl<'a, 'tcx> CFGBuilder<'a, 'tcx> {
         match destination.target_id {
             Ok(loop_id) => {
                 for b in &self.breakable_block_scopes {
-                    if b.block_expr_id == self.tcx.hir.node_to_hir_id(loop_id).local_id {
-                        let scope_id = self.tcx.hir.node_to_hir_id(loop_id).local_id;
-                        return (region::Scope::Node(scope_id), match scope_cf_kind {
+                    if b.block_expr_id == self.tcx.hir().node_to_hir_id(loop_id).local_id {
+                        let scope = region::Scope {
+                            id: self.tcx.hir().node_to_hir_id(loop_id).local_id,
+                            data: region::ScopeData::Node
+                        };
+                        return (scope, match scope_cf_kind {
                             ScopeCfKind::Break => b.break_index,
                             ScopeCfKind::Continue => bug!("can't continue to block"),
                         });
                     }
                 }
                 for l in &self.loop_scopes {
-                    if l.loop_id == self.tcx.hir.node_to_hir_id(loop_id).local_id {
-                        let scope_id = self.tcx.hir.node_to_hir_id(loop_id).local_id;
-                        return (region::Scope::Node(scope_id), match scope_cf_kind {
+                    if l.loop_id == self.tcx.hir().node_to_hir_id(loop_id).local_id {
+                        let scope = region::Scope {
+                            id: self.tcx.hir().node_to_hir_id(loop_id).local_id,
+                            data: region::ScopeData::Node
+                        };
+                        return (scope, match scope_cf_kind {
                             ScopeCfKind::Break => l.break_index,
                             ScopeCfKind::Continue => l.continue_index,
                         });

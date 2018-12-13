@@ -13,7 +13,6 @@
 
 // For clarity, rename the graphviz crate locally to dot.
 use graphviz as dot;
-use graphviz::IntoCow;
 
 use cfg;
 use hir;
@@ -33,11 +32,11 @@ pub struct LabelledCFG<'a, 'tcx: 'a> {
 impl<'a, 'tcx> LabelledCFG<'a, 'tcx> {
     fn local_id_to_string(&self, local_id: hir::ItemLocalId) -> String {
         assert!(self.cfg.owner_def_id.is_local());
-        let node_id = self.tcx.hir.hir_to_node_id(hir::HirId {
-            owner: self.tcx.hir.def_index_to_hir_id(self.cfg.owner_def_id.index).owner,
+        let node_id = self.tcx.hir().hir_to_node_id(hir::HirId {
+            owner: self.tcx.hir().def_index_to_hir_id(self.cfg.owner_def_id.index).owner,
             local_id
         });
-        let s = self.tcx.hir.node_to_string(node_id);
+        let s = self.tcx.hir().node_to_string(node_id);
 
         // Replacing newlines with \\l causes each line to be left-aligned,
         // improving presentation of (long) pretty-printed expressions.
@@ -71,21 +70,21 @@ impl<'a, 'hir> dot::Labeller<'a> for LabelledCFG<'a, 'hir> {
 
     fn node_label(&'a self, &(i, n): &Node<'a>) -> dot::LabelText<'a> {
         if i == self.cfg.entry {
-            dot::LabelText::LabelStr("entry".into_cow())
+            dot::LabelText::LabelStr("entry".into())
         } else if i == self.cfg.exit {
-            dot::LabelText::LabelStr("exit".into_cow())
+            dot::LabelText::LabelStr("exit".into())
         } else if n.data.id() == hir::DUMMY_ITEM_LOCAL_ID {
-            dot::LabelText::LabelStr("(dummy_node)".into_cow())
+            dot::LabelText::LabelStr("(dummy_node)".into())
         } else {
             let s = self.local_id_to_string(n.data.id());
-            dot::LabelText::EscStr(s.into_cow())
+            dot::LabelText::EscStr(s.into())
         }
     }
 
     fn edge_label(&self, e: &Edge<'a>) -> dot::LabelText<'a> {
         let mut label = String::new();
         if !self.labelled_edges {
-            return dot::LabelText::EscStr(label.into_cow());
+            return dot::LabelText::EscStr(label.into());
         }
         let mut put_one = false;
         for (i, &id) in e.data.exiting_scopes.iter().enumerate() {
@@ -99,7 +98,7 @@ impl<'a, 'hir> dot::Labeller<'a> for LabelledCFG<'a, 'hir> {
                                    i,
                                    &s[..]));
         }
-        dot::LabelText::EscStr(label.into_cow())
+        dot::LabelText::EscStr(label.into())
     }
 }
 
@@ -107,9 +106,8 @@ impl<'a> dot::GraphWalk<'a> for &'a cfg::CFG {
     type Node = Node<'a>;
     type Edge = Edge<'a>;
     fn nodes(&'a self) -> dot::Nodes<'a, Node<'a>> {
-        let mut v = Vec::new();
-        self.graph.each_node(|i, nd| { v.push((i, nd)); true });
-        v.into_cow()
+        let v: Vec<_> = self.graph.enumerated_nodes().collect();
+        v.into()
     }
     fn edges(&'a self) -> dot::Edges<'a, Edge<'a>> {
         self.graph.all_edges().iter().collect()

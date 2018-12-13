@@ -43,7 +43,7 @@ pub enum FnKind<'a> {
 /// Each method of the Visitor trait is a hook to be potentially
 /// overridden.  Each method's default implementation recursively visits
 /// the substructure of the input via the corresponding `walk` method;
-/// e.g. the `visit_mod` method by default calls `visit::walk_mod`.
+/// e.g., the `visit_mod` method by default calls `visit::walk_mod`.
 ///
 /// If you want to ensure that your code handles every variant
 /// explicitly, you need to override each method.  (And you also need
@@ -110,7 +110,7 @@ pub trait Visitor<'ast>: Sized {
     }
     fn visit_mac(&mut self, _mac: &'ast Mac) {
         panic!("visit_mac disabled by default");
-        // NB: see note about macros above.
+        // N.B., see note about macros above.
         // if you really want a visitor that
         // works on macros, use this
         // definition in your trait impl:
@@ -809,7 +809,7 @@ pub fn walk_expr<'a, V: Visitor<'a>>(visitor: &mut V, expression: &'a Expr) {
         ExprKind::Try(ref subexpression) => {
             visitor.visit_expr(subexpression)
         }
-        ExprKind::Catch(ref body) => {
+        ExprKind::TryBlock(ref body) => {
             visitor.visit_block(body)
         }
     }
@@ -819,7 +819,11 @@ pub fn walk_expr<'a, V: Visitor<'a>>(visitor: &mut V, expression: &'a Expr) {
 
 pub fn walk_arm<'a, V: Visitor<'a>>(visitor: &mut V, arm: &'a Arm) {
     walk_list!(visitor, visit_pat, &arm.pats);
-    walk_list!(visitor, visit_expr, &arm.guard);
+    if let Some(ref g) = &arm.guard {
+        match g {
+            Guard::If(ref e) => visitor.visit_expr(e),
+        }
+    }
     visitor.visit_expr(&arm.body);
     walk_list!(visitor, visit_attribute, &arm.attrs);
 }
@@ -837,7 +841,7 @@ pub fn walk_attribute<'a, V: Visitor<'a>>(visitor: &mut V, attr: &'a Attribute) 
 pub fn walk_tt<'a, V: Visitor<'a>>(visitor: &mut V, tt: TokenTree) {
     match tt {
         TokenTree::Token(_, tok) => visitor.visit_token(tok),
-        TokenTree::Delimited(_, delimed) => visitor.visit_tts(delimed.stream()),
+        TokenTree::Delimited(_, _, tts) => visitor.visit_tts(tts.stream()),
     }
 }
 

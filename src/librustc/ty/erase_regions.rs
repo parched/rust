@@ -11,7 +11,7 @@
 use ty::{self, Ty, TyCtxt};
 use ty::fold::{TypeFolder, TypeFoldable};
 
-pub(super) fn provide(providers: &mut ty::query::Providers) {
+pub(super) fn provide(providers: &mut ty::query::Providers<'_>) {
     *providers = ty::query::Providers {
         erase_regions_ty,
         ..*providers
@@ -19,7 +19,7 @@ pub(super) fn provide(providers: &mut ty::query::Providers) {
 }
 
 fn erase_regions_ty<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>, ty: Ty<'tcx>) -> Ty<'tcx> {
-    // NB: use `super_fold_with` here. If we used `fold_with`, it
+    // N.B., use `super_fold_with` here. If we used `fold_with`, it
     // could invoke the `erase_regions_ty` query recursively.
     ty.super_fold_with(&mut RegionEraserVisitor { tcx })
 }

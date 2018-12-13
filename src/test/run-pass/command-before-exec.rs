@@ -8,11 +8,12 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+#![allow(stable_features)]
 // ignore-windows - this is a unix-specific test
 // ignore-cloudabi no processes
 // ignore-emscripten no processes
 
-#![feature(process_exec, libc)]
+#![feature(process_exec, rustc_private)]
 
 extern crate libc;
 
@@ -24,7 +25,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 fn main() {
-    if let Some(arg) = env::args().skip(1).next() {
+    if let Some(arg) = env::args().nth(1) {
         match &arg[..] {
             "test1" => println!("hello2"),
             "test2" => assert_eq!(env::var("FOO").unwrap(), "BAR"),

@@ -15,8 +15,6 @@ use rustc::ty::TyCtxt;
 use std::fmt::Debug;
 use std::io::{self, Write};
 
-use rustc_data_structures::indexed_vec::Idx;
-
 use super::pretty::dump_mir_def_ids;
 
 /// Write a graphviz DOT graph of a list of MIRs.
@@ -40,7 +38,7 @@ pub fn write_mir_fn_graphviz<'tcx, W>(tcx: TyCtxt<'_, '_, 'tcx>,
                                       w: &mut W) -> io::Result<()>
     where W: Write
 {
-    writeln!(w, "digraph Mir_{} {{", tcx.hir.as_local_node_id(def_id).unwrap())?;
+    writeln!(w, "digraph Mir_{} {{", tcx.hir().as_local_node_id(def_id).unwrap())?;
 
     // Global graph properties
     writeln!(w, r#"    graph [fontname="monospace"];"#)?;
