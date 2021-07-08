@@ -36,7 +36,7 @@ use rustc::traits::query::type_op::custom::CustomTypeOp;
 use rustc::traits::query::{Fallible, NoSolution};
 use rustc::traits::{ObligationCause, PredicateObligations};
 use rustc::ty::fold::TypeFoldable;
-use rustc::ty::subst::{Subst, Substs, UnpackedKind, UserSubsts};
+use rustc::ty::subst::{Subst, SubstsRef, UnpackedKind, UserSubsts};
 use rustc::ty::{
     self, RegionVid, ToPolyTraitRef, Ty, TyCtxt, TyKind, UserType,
     CanonicalUserTypeAnnotation, UserTypeAnnotationIndex,
@@ -1602,10 +1602,17 @@ impl<'a, 'gcx, 'tcx> TypeChecker<'a, 'gcx, 'tcx> {
         from_hir_call: bool,
     ) {
         debug!("check_call_inputs({:?}, {:?})", sig, args);
-        if args.len() < sig.inputs().len() || (args.len() > sig.inputs().len() && !sig.variadic) {
+        // Do not count the `VaList` argument as a "true" argument to
+        // a C-variadic function.
+        let inputs = if sig.c_variadic {
+            &sig.inputs()[..sig.inputs().len() - 1]
+        } else {
+            &sig.inputs()[..]
+        };
+        if args.len() < inputs.len() || (args.len() > inputs.len() && !sig.c_variadic) {
             span_mirbug!(self, term, "call to {:?} with wrong # of args", sig);
         }
-        for (n, (fn_arg, op_arg)) in sig.inputs().iter().zip(args).enumerate() {
+        for (n, (fn_arg, op_arg)) in inputs.iter().zip(args).enumerate() {
             let op_arg_ty = op_arg.ty(mir, self.tcx());
             let category = if from_hir_call {
                 ConstraintCategory::CallArgument
@@ -2261,7 +2268,7 @@ impl<'a, 'gcx, 'tcx> TypeChecker<'a, 'gcx, 'tcx> {
         &mut self,
         tcx: TyCtxt<'a, 'gcx, 'tcx>,
         def_id: DefId,
-        substs: &'tcx Substs<'tcx>,
+        substs: SubstsRef<'tcx>,
         location: Location,
     ) -> ty::InstantiatedPredicates<'tcx> {
         if let Some(closure_region_requirements) = tcx.mir_borrowck(def_id).closure_requirements {

@@ -105,7 +105,7 @@ use rustc::session;
 use rustc::session::CompileIncomplete;
 use rustc::session::config::{EntryFnType, nightly_options};
 use rustc::traits::{ObligationCause, ObligationCauseCode, TraitEngine, TraitEngineExt};
-use rustc::ty::subst::Substs;
+use rustc::ty::subst::SubstsRef;
 use rustc::ty::{self, Ty, TyCtxt};
 use rustc::ty::query::Providers;
 use rustc::util;
@@ -116,7 +116,7 @@ use util::common::time;
 use std::iter;
 
 pub struct TypeAndSubsts<'tcx> {
-    substs: &'tcx Substs<'tcx>,
+    substs: SubstsRef<'tcx>,
     ty: Ty<'tcx>,
 }
 
@@ -136,14 +136,14 @@ fn check_type_alias_enum_variants_enabled<'a, 'gcx, 'tcx>(tcx: TyCtxt<'a, 'gcx, 
     }
 }
 
-fn require_c_abi_if_variadic(tcx: TyCtxt<'_, '_, '_>,
-                             decl: &hir::FnDecl,
-                             abi: Abi,
-                             span: Span) {
-    if decl.variadic && !(abi == Abi::C || abi == Abi::Cdecl) {
+fn require_c_abi_if_c_variadic(tcx: TyCtxt<'_, '_, '_>,
+                               decl: &hir::FnDecl,
+                               abi: Abi,
+                               span: Span) {
+    if decl.c_variadic && !(abi == Abi::C || abi == Abi::Cdecl) {
         let mut err = struct_span_err!(tcx.sess, span, E0045,
-            "variadic function must have C or cdecl calling convention");
-        err.span_label(span, "variadics require C or cdecl calling convention").emit();
+            "C-variadic function must have C or cdecl calling convention");
+        err.span_label(span, "C-variadics require C or cdecl calling convention").emit();
     }
 }
 
@@ -371,8 +371,8 @@ pub fn hir_ty_to_ty<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>, hir_ty: &hir::Ty) -> 
     // In case there are any projections etc, find the "environment"
     // def-id that will be used to determine the traits/predicates in
     // scope.  This is derived from the enclosing item-like thing.
-    let env_node_id = tcx.hir().get_parent(hir_ty.id);
-    let env_def_id = tcx.hir().local_def_id(env_node_id);
+    let env_node_id = tcx.hir().get_parent_item(hir_ty.hir_id);
+    let env_def_id = tcx.hir().local_def_id_from_hir_id(env_node_id);
     let item_cx = self::collect::ItemCtxt::new(tcx, env_def_id);
 
     astconv::AstConv::ast_ty_to_ty(&item_cx, hir_ty)
